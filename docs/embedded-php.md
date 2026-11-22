@@ -234,3 +234,10 @@ instance, so requests are processed in parallel across workers.
   single-threaded (mutex). Use `--workers N` for parallelism.
 - **opcache shared memory**: workers share bytecode cache via named shared
   memory on Windows. Cold start compiles all scripts.
+
+## See also
+
+- [`php-abi-structures.md`](php-abi-structures.md) — the mirrored PHP structs,
+  callback semantics, and peak-throughput techniques
+- [`performance.md`](performance.md) — measured numbers and per-request breakdown
+- [`runtime-architecture.md`](runtime-architecture.md) — master/worker model
