@@ -122,10 +122,10 @@ impl IniEntriesResolver {
         let _ = std::fs::create_dir_all(&cache_dir);
 
         let mut entries = String::new();
-        // Load the opcache Zend extension. It must be loaded before any
-        // opcache.* directives are parsed; `extension_dir` comes from the
-        // main php.ini which PHP reads before the scan directory.
-        entries.push_str("zend_extension=php_opcache.dll\n");
+        // Note: the system php.ini already loads opcache (zend_extension=opcache),
+        // so we must NOT add `zend_extension=php_opcache.dll` here or it will be
+        // loaded twice ("Cannot load Zend OPcache - it was already loaded").
+        // These opcache.* directives configure the already-loaded extension.
         entries.push_str("opcache.enable=1\n");
         entries.push_str("opcache.enable_cli=1\n");
         // Persist compiled bytecode so it is reused across processes.

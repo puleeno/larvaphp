@@ -74,6 +74,8 @@ fn main() {
     }));
 
     println!("cargo:rerun-if-changed={}", stub_src.join("stubs.c").display());
+    println!("cargo:rerun-if-changed={}", stub_src.join("larva_embed.c").display());
+    println!("cargo:rerun-if-changed={}", stub_src.join("larva_embed.h").display());
 
     // ---- Link against php8.lib ----
     println!(
@@ -102,9 +104,13 @@ fn main() {
 
     // ---- Compile stubs.c using cc crate ----
     let stub_path = stub_src.join("stubs.c");
+    let embed_path = stub_src.join("larva_embed.c");
     let mut build = cc::Build::new();
     if stub_path.exists() {
         build.file(stub_path);
+    }
+    if embed_path.exists() {
+        build.file(embed_path);
     }
 
     // Add VC include directory explicitly

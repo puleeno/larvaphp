@@ -197,32 +197,10 @@ impl PhpExecutor for FfiExecutor {
         "ffi"
     }
 
-    fn execute(&self, _req: &Request) -> Result<Response, String> {
+    fn execute(&self, req: &Request) -> Result<Response, String> {
         #[cfg(feature = "embedded")]
         {
-            let out = crate::embed_php::execute_script(&_req.script_path)
-                .map_err(|e| e.to_string())?;
-            // Minimal CGI-output parsing: split headers/body at blank line.
-            let text = String::from_utf8_lossy(&out).to_string();
-            let (head, body) = match text.find("\r\n\r\n") {
-                Some(p) => (&text[..p], &text[p + 4..]),
-                None => match text.find("\n\n") {
-                    Some(p) => (&text[..p], &text[p + 2..]),
-                    None => ("", text.as_str()),
-                },
-            };
-            let mut status = 200u16;
-            let mut headers = Vec::new();
-            for line in head.lines() {
-                if let Some((k, v)) = line.split_once(':') {
-                    if k.eq_ignore_ascii_case("status") {
-                        status = v.split_whitespace().next().and_then(|s| s.parse().ok()).unwrap_or(200);
-                        continue;
-                    }
-                    headers.push((k.trim().to_string(), v.trim().to_string()));
-                }
-            }
-            Ok(Response { status, headers, body: body.as_bytes().to_vec() })
+            crate::embed_php::execute_request(req).map_err(|e| e.to_string())
         }
         #[cfg(not(feature = "embedded"))]
         {

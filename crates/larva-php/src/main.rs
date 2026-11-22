@@ -40,6 +40,12 @@ struct Args {
     #[arg(long = "http3")]
     http3: bool,
 
+    /// Use the embedded PHP runtime (in-process, no php-cgi spawn).
+    /// Requires --features embedded. The NTS php8.dll is not thread-safe,
+    /// so --workers must be 1 (or 0 for single-process mode).
+    #[arg(long = "embedded")]
+    embedded: bool,
+
     /// Path to a TLS certificate (PEM) for HTTP/3. Auto-generated if missing.
     #[arg(long = "cert", value_name = "FILE")]
     cert: Option<String>,
@@ -76,6 +82,10 @@ struct Args {
     /// Hidden: test the embedded PHP FFI executor directly on a script.
     #[arg(long = "ffi-test", hide = true, value_name = "SCRIPT")]
     ffi_test: Option<String>,
+
+    /// Hidden: test the embedded PHP request executor with mock CGI data.
+    #[arg(long = "ffi-request-test", hide = true, value_name = "SCRIPT")]
+    ffi_request_test: Option<String>,
 }
 
 fn print_usage(out: &mut dyn std::io::Write) {
@@ -180,14 +190,68 @@ fn main() -> ExitCode {
         #[cfg(feature = "embedded")]
         {
             println!("embedded available: {}", larva_php::embed_php::is_available());
-            match larva_php::embed_php::execute_script(script) {
-                Ok(out) => {
-                    println!("OUTPUT ({} bytes):", out.len());
-                    println!("{}", String::from_utf8_lossy(&out));
+            // Run twice: the first run compiles+caches, the second should be a
+            // cache hit (opcache) and noticeably faster.
+            for i in 1..=2 {
+                let t0 = std::time::Instant::now();
+                match larva_php::embed_php::execute_script(_script) {
+                    Ok(out) => {
+                        let dt = t0.elapsed();
+                        println!("run {}: {} bytes in {:?}", i, out.len(), dt);
+                        if i == 2 {
+                            println!("--- second run output ---");
+                            println!("{}", String::from_utf8_lossy(&out));
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("FFI error on run {}: {}", i, e);
+                        return ExitCode::from(1);
+                    }
+                }
+            }
+            return ExitCode::SUCCESS;
+        }
+        #[cfg(not(feature = "embedded"))]
+        {
+            eprintln!("built without --features embedded");
+            return ExitCode::from(1);
+        }
+    }
+
+    // Request-context FFI test: execute a script with full CGI request data.
+    if let Some(script) = &args.ffi_request_test {
+        tracing_subscriber::fmt::init();
+        #[cfg(feature = "embedded")]
+        {
+            use larva_php::runtime::executor::Request;
+            let req = Request {
+                method: "GET".to_string(),
+                uri: "/test.php?foo=bar&baz=qux".to_string(),
+                headers: vec![
+                    ("Host".to_string(), "127.0.0.1:8000".to_string()),
+                    ("Cookie".to_string(), "session=abc123".to_string()),
+                    ("User-Agent".to_string(), "LarvaPHP-Test/1.0".to_string()),
+                ],
+                body: Vec::new(),
+                script_path: script.clone(),
+                server_name: "127.0.0.1".to_string(),
+                server_port: "8000".to_string(),
+                script_name: "/test.php".to_string(),
+            };
+            let t0 = std::time::Instant::now();
+            match larva_php::embed_php::execute_request(&req) {
+                Ok(resp) => {
+                    println!("status: {} in {:?}", resp.status, t0.elapsed());
+                    println!("headers:");
+                    for (k, v) in &resp.headers {
+                        println!("  {}: {}", k, v);
+                    }
+                    println!("body ({} bytes):", resp.body.len());
+                    println!("{}", String::from_utf8_lossy(&resp.body));
                     return ExitCode::SUCCESS;
                 }
                 Err(e) => {
-                    eprintln!("FFI error: {}", e);
+                    eprintln!("request error: {}", e);
                     return ExitCode::from(1);
                 }
             }
@@ -217,6 +281,20 @@ fn main() -> ExitCode {
                 return ExitCode::from(1);
             }
         };
+
+        // Embedded mode: use the in-process PHP runtime (no php-cgi spawn).
+        if args.embedded {
+            #[cfg(feature = "embedded")]
+            {
+                std::env::set_var("LARVA_PHP_EXECUTOR", "ffi");
+                tracing::info!("embedded PHP mode enabled (in-process, no php-cgi spawn)");
+            }
+            #[cfg(not(feature = "embedded"))]
+            {
+                eprintln!("--embedded requires building with --features embedded");
+                return ExitCode::from(1);
+            }
+        }
 
         // Initialize PHP runtime
         let mut server = larva_php::server::Server::new(&root).unwrap();

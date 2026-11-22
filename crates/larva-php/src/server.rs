@@ -1433,6 +1433,75 @@ params.push(("HTTP_HOST".into(), http_host.clone()));
         }
     }
 
+    // Embedded PHP path: run in-process (no php-cgi spawn). Activated by
+    // --embedded (sets LARVA_PHP_EXECUTOR=ffi). The NTS php8.dll is not
+    // thread-safe, so embed_php::execute_request serialises access with a
+    // mutex. This is faster than CGI/FastCGI (no process spawn) but requires
+    // building with --features embedded.
+    if std::env::var("LARVA_PHP_EXECUTOR").as_deref() == Ok("ffi") {
+        #[cfg(feature = "embedded")]
+        {
+            let req_headers: Vec<(String, String)> = ctx
+                .env
+                .iter()
+                .filter_map(|(k, v)| {
+                    std::str::from_utf8(k)
+                        .ok()
+                        .and_then(|ks| std::str::from_utf8(v).ok().map(|vs| (ks.to_string(), vs.to_string())))
+                })
+                .collect();
+            let mut all_headers = req_headers;
+            if !ctx.content_length.is_empty() {
+                all_headers.push(("CONTENT_LENGTH".to_string(), ctx.content_length.clone()));
+            } else if !body.is_empty() {
+                all_headers.push(("CONTENT_LENGTH".to_string(), body.len().to_string()));
+            }
+            if !ctx.content_type.is_empty() {
+                all_headers.push(("CONTENT_TYPE".to_string(), ctx.content_type.clone()));
+            }
+            all_headers.push(("HTTP_HOST".to_string(), http_host.clone()));
+            if let Some(cookie) = ctx
+                .env
+                .iter()
+                .find_map(|(k, v)| {
+                    let ks = std::str::from_utf8(k).ok()?;
+                    if ks.eq_ignore_ascii_case("Cookie") {
+                        std::str::from_utf8(v).ok().map(|s| s.to_string())
+                    } else {
+                        None
+                    }
+                })
+            {
+                all_headers.push(("HTTP_COOKIE".to_string(), cookie));
+            }
+            match crate::embed_php::execute_request(&crate::runtime::executor::Request {
+                method: ctx.request_method.clone(),
+                uri: ctx.request_uri.clone(),
+                headers: all_headers,
+                body: body.to_vec(),
+                script_path: script_path.to_string(),
+                server_name: ctx.server_name.clone(),
+                server_port: ctx.server_port.clone(),
+                script_name: script_name.clone(),
+            }) {
+                Ok(resp) => {
+                    // Build CGI-style output string: status line + headers + body.
+                    let mut out = format!("Status: {} {}\r\n", resp.status, "");
+                    for (k, v) in &resp.headers {
+                        out.push_str(&format!("{}: {}\r\n", k, v));
+                    }
+                    out.push_str("\r\n");
+                    let mut bytes = out.into_bytes();
+                    bytes.extend_from_slice(&resp.body);
+                    return Ok(String::from_utf8_lossy(&bytes).into_owned());
+                }
+                Err(e) => {
+                    tracing::warn!("embedded PHP request failed, falling back to CGI: {}", e);
+                }
+            }
+        }
+    }
+
     // NOTE: embedded PHP (feature "embedded") is experimental and requires the
     // exact PHP 8.x ABI (sapi_module_struct / zend_file_handle layouts). Without
     // PHP development headers the struct layout is wrong and PHP crashes, so it
