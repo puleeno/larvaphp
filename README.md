@@ -10,6 +10,7 @@ larva-php/
 ├── README.md
 ├── docs/
 │   ├── architecture.md             # System architecture
+│   ├── embedded-php.md             # Embedded PHP via C shim (in-process PHP)
 │   ├── configuration.md            # Configuration reference
 │   ├── api.md                      # Public API documentation
 │   ├── hot-reload.md               # Hot reload guide
