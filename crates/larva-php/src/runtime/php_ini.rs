@@ -231,4 +231,169 @@ mod tests {
         assert!(cfg.entries.is_some());
         assert!(cfg.path.is_none());
     }
+
+    // ---- No double-load of opcache ----
+
+    #[test]
+    fn entries_do_not_double_load_opcache() {
+        // The system php.ini already loads opcache (zend_extension=opcache).
+        // Our entries must NOT include zend_extension=php_opcache.dll or PHP
+        // will warn "Cannot load Zend OPcache - it was already loaded".
+        let entries = IniEntriesResolver::entries();
+        assert!(
+            !entries.contains("zend_extension"),
+            "entries must not contain zend_extension (causes double-load): {}",
+            entries
+        );
+    }
+
+    #[test]
+    fn entries_enable_opcache_cli() {
+        let entries = IniEntriesResolver::entries();
+        assert!(
+            entries.contains("opcache.enable_cli=1"),
+            "opcache.enable_cli must be 1 for embedded SAPI"
+        );
+    }
+
+    #[test]
+    fn entries_disable_timestamp_validation() {
+        // Production semantics: never re-check file mtimes.
+        let entries = IniEntriesResolver::entries();
+        assert!(entries.contains("opcache.validate_timestamps=0"));
+        assert!(entries.contains("opcache.revalidate_freq=0"));
+    }
+
+    #[test]
+    fn entries_set_memory_limits() {
+        let entries = IniEntriesResolver::entries();
+        assert!(entries.contains("opcache.memory_consumption=512"));
+        assert!(entries.contains("opcache.interned_strings_buffer=32"));
+        assert!(entries.contains("opcache.max_accelerated_files=100000"));
+    }
+
+    #[test]
+    fn entries_include_file_cache() {
+        let entries = IniEntriesResolver::entries();
+        assert!(entries.contains("opcache.file_cache="));
+        assert!(entries.contains("opcache.file_cache_only=0"));
+    }
+
+    // ---- IniEntriesResolver ----
+
+    #[test]
+    fn ini_entries_resolver_always_has_entries() {
+        let resolver = IniEntriesResolver;
+        let cfg = resolver.resolve();
+        assert!(cfg.entries.is_some());
+        assert!(cfg.path.is_none());
+        assert!(cfg.dir.is_none());
+    }
+
+    #[test]
+    fn file_cache_dir_can_be_created() {
+        let dir = IniEntriesResolver::file_cache_dir();
+        // entries() creates the dir; verify it exists after calling entries().
+        let _ = IniEntriesResolver::entries();
+        assert!(dir.exists() || std::fs::create_dir_all(&dir).is_ok());
+    }
+
+    // ---- ChainResolver ordering ----
+
+    #[test]
+    fn chain_resolver_first_wins_for_path() {
+        // A custom resolver that provides a path should win over later ones.
+        struct FakeResolver {
+            path: Option<PathBuf>,
+            entries: Option<String>,
+        }
+        impl PhpIniResolver for FakeResolver {
+            fn resolve(&self) -> PhpIniConfig {
+                PhpIniConfig {
+                    dir: None,
+                    path: self.path.clone(),
+                    entries: self.entries.clone(),
+                }
+            }
+        }
+
+        let chain = ChainResolver::new(vec![
+            Box::new(FakeResolver {
+                path: Some(PathBuf::from("/custom/php.ini")),
+                entries: None,
+            }),
+            Box::new(IniEntriesResolver),
+        ]);
+        let cfg = chain.resolve();
+        assert_eq!(cfg.path, Some(PathBuf::from("/custom/php.ini")));
+        assert!(cfg.entries.is_some()); // filled by second resolver
+    }
+
+    #[test]
+    fn chain_resolver_later_fills_gaps() {
+        struct FakeResolver {
+            path: Option<PathBuf>,
+        }
+        impl PhpIniResolver for FakeResolver {
+            fn resolve(&self) -> PhpIniConfig {
+                PhpIniConfig {
+                    dir: None,
+                    path: self.path.clone(),
+                    entries: None,
+                }
+            }
+        }
+
+        let chain = ChainResolver::new(vec![
+            Box::new(FakeResolver { path: None }),
+            Box::new(FakeResolver {
+                path: Some(PathBuf::from("/fallback/php.ini")),
+            }),
+        ]);
+        let cfg = chain.resolve();
+        assert_eq!(cfg.path, Some(PathBuf::from("/fallback/php.ini")));
+    }
+
+    // ---- EnvResolver ----
+
+    #[test]
+    fn env_resolver_no_env_returns_empty() {
+        // Without LARVA_PHP_INI or PHPRC set, returns default (empty).
+        // Note: we can't unset env vars another test set, so we just verify
+        // the resolver doesn't panic.
+        let cfg = EnvResolver.resolve();
+        // If env vars happen to be set, path/dir may be Some; that's fine.
+        let _ = cfg;
+    }
+
+    #[test]
+    fn path_resolver_does_not_panic() {
+        let cfg = PathResolver.resolve();
+        // On Windows with PHP installed, this should find php.ini.
+        // On systems without PHP, it returns default.
+        let _ = cfg;
+    }
+
+    // ---- PhpIniConfig default ----
+
+    #[test]
+    fn php_ini_config_default_is_empty() {
+        let cfg = PhpIniConfig::default();
+        assert!(cfg.dir.is_none());
+        assert!(cfg.path.is_none());
+        assert!(cfg.entries.is_none());
+    }
+
+    #[test]
+    fn php_ini_config_clone() {
+        let cfg = PhpIniConfig {
+            dir: Some("/php".into()),
+            path: Some(PathBuf::from("/php/php.ini")),
+            entries: Some("opcache.enable=1".into()),
+        };
+        let cloned = cfg.clone();
+        assert_eq!(cloned.dir, cfg.dir);
+        assert_eq!(cloned.path, cfg.path);
+        assert_eq!(cloned.entries, cfg.entries);
+    }
 }

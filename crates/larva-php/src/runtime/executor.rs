@@ -225,3 +225,181 @@ pub fn default_executor() -> Arc<dyn PhpExecutor> {
     }
     Arc::new(CgiExecutor)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- MockExecutor ----
+
+    #[test]
+    fn mock_executor_name() {
+        assert_eq!(MockExecutor.name(), "mock");
+    }
+
+    #[test]
+    fn mock_executor_echoes_request() {
+        let req = Request {
+            method: "POST".into(),
+            uri: "/test.php?a=1".into(),
+            headers: vec![("Host".into(), "localhost".into())],
+            body: b"hello".to_vec(),
+            script_path: "/var/www/test.php".into(),
+            server_name: "localhost".into(),
+            server_port: "80".into(),
+            script_name: "/test.php".into(),
+        };
+        let resp = MockExecutor.execute(&req).unwrap();
+        assert_eq!(resp.status, 200);
+        let body = String::from_utf8_lossy(&resp.body);
+        assert!(body.contains("MOCK POST /test.php?a=1"));
+        assert!(body.contains("Script: /var/www/test.php"));
+        assert!(body.contains("Headers: 1"));
+        assert!(body.contains("Body: 5 bytes"));
+    }
+
+    #[test]
+    fn mock_executor_empty_request() {
+        let req = Request {
+            method: "GET".into(),
+            uri: "/".into(),
+            headers: vec![],
+            body: vec![],
+            script_path: "/index.php".into(),
+            server_name: "localhost".into(),
+            server_port: "80".into(),
+            script_name: "/index.php".into(),
+        };
+        let resp = MockExecutor.execute(&req).unwrap();
+        assert_eq!(resp.status, 200);
+        let body = String::from_utf8_lossy(&resp.body);
+        assert!(body.contains("Body: 0 bytes"));
+    }
+
+    // ---- FfiExecutor ----
+
+    #[test]
+    fn ffi_executor_name() {
+        assert_eq!(FfiExecutor.name(), "ffi");
+    }
+
+    #[cfg(not(feature = "embedded"))]
+    #[test]
+    fn ffi_executor_without_embedded_returns_error() {
+        let req = Request {
+            method: "GET".into(),
+            uri: "/".into(),
+            headers: vec![],
+            body: vec![],
+            script_path: "/tmp/test.php".into(),
+            server_name: "localhost".into(),
+            server_port: "80".into(),
+            script_name: "/index.php".into(),
+        };
+        let r = FfiExecutor.execute(&req);
+        assert!(r.is_err());
+        let msg = r.unwrap_err();
+        assert!(msg.contains("not enabled") || msg.contains("embedded"));
+    }
+
+    // ---- default_executor ----
+
+    #[test]
+    fn default_executor_is_cgi_without_env() {
+        // Without LARVA_PHP_EXECUTOR=ffi, the default is always CgiExecutor.
+        // We can't easily unset an env var that another test set, so we just
+        // verify the name is one of the known values.
+        let exec = default_executor();
+        let name = exec.name();
+        assert!(
+            name == "cgi" || name == "ffi",
+            "unexpected executor name: {}",
+            name
+        );
+    }
+
+    #[test]
+    fn default_executor_is_arc() {
+        // Verify it returns an Arc (can be cloned and shared).
+        let exec1 = default_executor();
+        let exec2 = exec1.clone();
+        assert_eq!(exec1.name(), exec2.name());
+    }
+
+    // ---- Request / Response serde ----
+
+    #[test]
+    fn request_serde_roundtrip() {
+        let req = Request {
+            method: "POST".into(),
+            uri: "/submit?x=1".into(),
+            headers: vec![
+                ("Host".into(), "example.com".into()),
+                ("Content-Type".into(), "application/json".into()),
+            ],
+            body: b"{\"key\":\"value\"}".to_vec(),
+            script_path: "/app/submit.php".into(),
+            server_name: "example.com".into(),
+            server_port: "443".into(),
+            script_name: "/submit.php".into(),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let de: Request = serde_json::from_str(&json).unwrap();
+        assert_eq!(de.method, "POST");
+        assert_eq!(de.uri, "/submit?x=1");
+        assert_eq!(de.headers.len(), 2);
+        assert_eq!(de.body, b"{\"key\":\"value\"}");
+        assert_eq!(de.server_port, "443");
+    }
+
+    #[test]
+    fn response_serde_roundtrip() {
+        let resp = Response {
+            status: 404,
+            headers: vec![("content-type".into(), "text/html".into())],
+            body: b"<h1>Not Found</h1>".to_vec(),
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let de: Response = serde_json::from_str(&json).unwrap();
+        assert_eq!(de.status, 404);
+        assert_eq!(de.headers.len(), 1);
+        assert_eq!(de.body, b"<h1>Not Found</h1>");
+    }
+
+    #[test]
+    fn request_with_unicode_body() {
+        let req = Request {
+            method: "POST".into(),
+            uri: "/upload".into(),
+            headers: vec![],
+            body: "こんにちは世界".as_bytes().to_vec(),
+            script_path: "/upload.php".into(),
+            server_name: "localhost".into(),
+            server_port: "80".into(),
+            script_name: "/upload.php".into(),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let de: Request = serde_json::from_str(&json).unwrap();
+        assert_eq!(de.body, "こんにちは世界".as_bytes());
+    }
+
+    // ---- MockExecutor as PhpExecutor trait object ----
+
+    #[test]
+    fn mock_executor_as_trait_object() {
+        let exec: Arc<dyn PhpExecutor> = Arc::new(MockExecutor);
+        assert_eq!(exec.name(), "mock");
+        let req = Request {
+            method: "GET".into(),
+            uri: "/".into(),
+            headers: vec![],
+            body: vec![],
+            script_path: "/index.php".into(),
+            server_name: "localhost".into(),
+            server_port: "80".into(),
+            script_name: "/index.php".into(),
+        };
+        let resp = exec.execute(&req).unwrap();
+        assert_eq!(resp.status, 200);
+    }
+}

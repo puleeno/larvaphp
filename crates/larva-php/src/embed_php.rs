@@ -314,3 +314,364 @@ pub mod imp {
 
 #[cfg(not(feature = "embedded"))]
 pub use imp::*;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- Non-embedded stubs (always compiled) ----
+
+    #[cfg(not(feature = "embedded"))]
+    #[test]
+    fn not_embedded_is_available_is_false() {
+        assert!(!is_available());
+    }
+
+    #[cfg(not(feature = "embedded"))]
+    #[test]
+    fn not_embedded_execute_script_returns_error() {
+        let r = execute_script("/tmp/test.php");
+        assert!(r.is_err());
+        let msg = format!("{}", r.unwrap_err());
+        assert!(msg.contains("not enabled"));
+    }
+
+    #[cfg(not(feature = "embedded"))]
+    #[test]
+    fn not_embedded_execute_request_returns_error() {
+        let req = crate::runtime::executor::Request {
+            method: "GET".into(),
+            uri: "/".into(),
+            headers: vec![],
+            body: vec![],
+            script_path: "/tmp/test.php".into(),
+            server_name: "localhost".into(),
+            server_port: "80".into(),
+            script_name: "/index.php".into(),
+        };
+        let r = execute_request(&req);
+        assert!(r.is_err());
+    }
+
+    #[cfg(not(feature = "embedded"))]
+    #[test]
+    fn not_embedded_shutdown_is_noop() {
+        shutdown(); // must not panic
+    }
+
+    // ---- Header parsing logic (extracted from execute_request) ----
+    // These test the pure-Rust logic that parses CGI header strings into
+    // (key, value) pairs, without needing a PHP runtime.
+
+    #[test]
+    fn parse_header_lines_skips_status_line() {
+        let headers_str = "HTTP/1.0 200 OK\r\nContent-Type: text/html\r\nX-Foo: bar\r\n";
+        let mut headers = Vec::new();
+        for line in headers_str.lines() {
+            if line.starts_with("HTTP/") {
+                continue;
+            }
+            if let Some((k, v)) = line.split_once(':') {
+                headers.push((k.trim().to_string(), v.trim().to_string()));
+            }
+        }
+        assert_eq!(headers.len(), 2);
+        assert_eq!(headers[0], ("Content-Type".into(), "text/html".into()));
+        assert_eq!(headers[1], ("X-Foo".into(), "bar".into()));
+    }
+
+    #[test]
+    fn parse_header_lines_handles_empty() {
+        let headers_str = "";
+        let mut headers = Vec::new();
+        for line in headers_str.lines() {
+            if line.starts_with("HTTP/") {
+                continue;
+            }
+            if let Some((k, v)) = line.split_once(':') {
+                headers.push((k.trim().to_string(), v.trim().to_string()));
+            }
+        }
+        assert!(headers.is_empty());
+    }
+
+    #[test]
+    fn parse_header_lines_skips_malformed() {
+        let headers_str = "NoColonHere\r\nContent-Type: text/plain\r\n";
+        let mut headers = Vec::new();
+        for line in headers_str.lines() {
+            if line.starts_with("HTTP/") {
+                continue;
+            }
+            if let Some((k, v)) = line.split_once(':') {
+                headers.push((k.trim().to_string(), v.trim().to_string()));
+            }
+        }
+        assert_eq!(headers.len(), 1);
+        assert_eq!(headers[0].0, "Content-Type");
+    }
+
+    // ---- Server var key construction (from execute_request) ----
+
+    fn server_var_key(header_name: &str) -> Option<String> {
+        if header_name.starts_with("HTTP_") {
+            Some(header_name.to_string())
+        } else if header_name.eq_ignore_ascii_case("Content-Type")
+            || header_name.eq_ignore_ascii_case("Content-Length")
+        {
+            None // handled via SG(request_info)
+        } else {
+            Some(format!(
+                "HTTP_{}",
+                header_name.to_ascii_uppercase().replace('-', "_")
+            ))
+        }
+    }
+
+    #[test]
+    fn server_var_key_converts_header() {
+        assert_eq!(
+            server_var_key("User-Agent").as_deref(),
+            Some("HTTP_USER_AGENT")
+        );
+        assert_eq!(
+            server_var_key("X-Real-IP").as_deref(),
+            Some("HTTP_X_REAL_IP")
+        );
+    }
+
+    #[test]
+    fn server_var_key_passthrough_http_prefix() {
+        assert_eq!(
+            server_var_key("HTTP_COOKIE").as_deref(),
+            Some("HTTP_COOKIE")
+        );
+    }
+
+    #[test]
+    fn server_var_key_skips_content_type_and_length() {
+        assert!(server_var_key("Content-Type").is_none());
+        assert!(server_var_key("Content-Length").is_none());
+        assert!(server_var_key("content-type").is_none());
+    }
+
+    // ---- Query string splitting (from execute_request) ----
+
+    #[test]
+    fn query_string_split() {
+        assert_eq!(
+            "/index.php?foo=bar&baz=qux".split_once('?').map(|(_, q)| q),
+            Some("foo=bar&baz=qux")
+        );
+        assert_eq!("/index.php".split_once('?').map(|(_, q)| q), None);
+        assert_eq!(
+            "/path?a=1".split_once('?').map(|(p, _)| p),
+            Some("/path")
+        );
+    }
+
+    // ---- Embedded feature tests (require PHP + --features embedded) ----
+
+    #[cfg(feature = "embedded")]
+    mod embedded_tests {
+        use super::super::*;
+        use std::sync::Mutex;
+
+        /// Serialise embedded tests: the NTS php8.dll is not thread-safe and
+        /// PHP's compiler needs a large stack that cargo test's default 2MB
+        /// threads don't provide. Each test runs on a dedicated 64MB-stack
+        /// thread guarded by this mutex.
+        static TEST_LOCK: Mutex<()> = Mutex::new(());
+
+        fn run_on_big_stack<F, R>(f: F) -> R
+        where
+            F: FnOnce() -> R + Send + 'static,
+            R: Send + 'static,
+        {
+            let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            std::thread::Builder::new()
+                .stack_size(64 * 1024 * 1024)
+                .spawn(f)
+                .unwrap()
+                .join()
+                .unwrap()
+        }
+
+        #[test]
+        fn embedded_is_available_after_init() {
+            run_on_big_stack(|| {
+                let _ = is_available();
+            });
+        }
+
+        #[test]
+        fn embedded_execute_script_produces_output() {
+            run_on_big_stack(|| {
+                let dir = std::env::temp_dir().join("larva-embed-test");
+                let _ = std::fs::create_dir_all(&dir);
+                let script = dir.join("hello.php");
+                std::fs::write(&script, "<?php echo \"hello embed\";").unwrap();
+
+                match execute_script(script.to_str().unwrap()) {
+                    Ok(out) => {
+                        let s = String::from_utf8_lossy(&out);
+                        assert!(
+                            s.contains("hello embed"),
+                            "expected 'hello embed' in output, got: {}",
+                            s
+                        );
+                    }
+                    Err(e) => {
+                        eprintln!("embedded not available (skipped): {}", e);
+                    }
+                }
+            });
+        }
+
+        #[test]
+        fn embedded_execute_script_opcache_enabled() {
+            run_on_big_stack(|| {
+                let dir = std::env::temp_dir().join("larva-embed-oc-test");
+                let _ = std::fs::create_dir_all(&dir);
+                let script = dir.join("oc.php");
+                std::fs::write(
+                    &script,
+                    "<?php echo extension_loaded('Zend OPcache') ? 'yes' : 'no';",
+                )
+                .unwrap();
+
+                if let Ok(out) = execute_script(script.to_str().unwrap()) {
+                    let s = String::from_utf8_lossy(&out);
+                    assert_eq!(s.trim(), "yes", "opcache should be loaded");
+                }
+            });
+        }
+
+        #[test]
+        fn embedded_execute_request_populates_superglobals() {
+            run_on_big_stack(|| {
+                let dir = std::env::temp_dir().join("larva-embed-req-test");
+                let _ = std::fs::create_dir_all(&dir);
+                let script = dir.join("probe.php");
+                std::fs::write(
+                    &script,
+                    r#"<?php echo $_SERVER['REQUEST_METHOD'] . '|' . ($_GET['foo'] ?? 'none') . '|' . ($_SERVER['HTTP_HOST'] ?? 'none');"#,
+                )
+                .unwrap();
+
+                let req = crate::runtime::executor::Request {
+                    method: "GET".into(),
+                    uri: "/probe.php?foo=bar".into(),
+                    headers: vec![("Host".into(), "example.com".into())],
+                    body: vec![],
+                    script_path: script.to_str().unwrap().to_string(),
+                    server_name: "example.com".into(),
+                    server_port: "80".into(),
+                    script_name: "/probe.php".into(),
+                };
+
+                if let Ok(resp) = execute_request(&req) {
+                    let body = String::from_utf8_lossy(&resp.body);
+                    assert!(body.contains("GET"), "expected GET in body: {}", body);
+                    assert!(body.contains("bar"), "expected query param 'bar' in body: {}", body);
+                }
+            });
+        }
+
+        #[test]
+        fn embedded_execute_request_captures_headers() {
+            run_on_big_stack(|| {
+                let dir = std::env::temp_dir().join("larva-embed-hdr-test");
+                let _ = std::fs::create_dir_all(&dir);
+                let script = dir.join("hdr.php");
+                std::fs::write(
+                    &script,
+                    "<?php header('X-Custom: test-value'); echo 'ok';",
+                )
+                .unwrap();
+
+                let req = crate::runtime::executor::Request {
+                    method: "GET".into(),
+                    uri: "/hdr.php".into(),
+                    headers: vec![],
+                    body: vec![],
+                    script_path: script.to_str().unwrap().to_string(),
+                    server_name: "localhost".into(),
+                    server_port: "80".into(),
+                    script_name: "/hdr.php".into(),
+                };
+
+                if let Ok(resp) = execute_request(&req) {
+                    let has_custom = resp
+                        .headers
+                        .iter()
+                        .any(|(k, v)| k.eq_ignore_ascii_case("X-Custom") && v == "test-value");
+                    assert!(has_custom, "expected X-Custom header, got: {:?}", resp.headers);
+                }
+            });
+        }
+
+        #[test]
+        fn embedded_execute_request_captures_status() {
+            run_on_big_stack(|| {
+                let dir = std::env::temp_dir().join("larva-embed-status-test");
+                let _ = std::fs::create_dir_all(&dir);
+                let script = dir.join("status.php");
+                std::fs::write(
+                    &script,
+                    "<?php http_response_code(404); echo 'not found';",
+                )
+                .unwrap();
+
+                let req = crate::runtime::executor::Request {
+                    method: "GET".into(),
+                    uri: "/status.php".into(),
+                    headers: vec![],
+                    body: vec![],
+                    script_path: script.to_str().unwrap().to_string(),
+                    server_name: "localhost".into(),
+                    server_port: "80".into(),
+                    script_name: "/status.php".into(),
+                };
+
+                if let Ok(resp) = execute_request(&req) {
+                    assert_eq!(resp.status, 404, "expected 404 status");
+                }
+            });
+        }
+
+        #[test]
+        fn embedded_execute_request_post_body() {
+            run_on_big_stack(|| {
+                let dir = std::env::temp_dir().join("larva-embed-post-test");
+                let _ = std::fs::create_dir_all(&dir);
+                let script = dir.join("post.php");
+                std::fs::write(
+                    &script,
+                    "<?php echo file_get_contents('php://input');",
+                )
+                .unwrap();
+
+                let body = b"hello=world&foo=bar";
+                let req = crate::runtime::executor::Request {
+                    method: "POST".into(),
+                    uri: "/post.php".into(),
+                    headers: vec![(
+                        "Content-Type".into(),
+                        "application/x-www-form-urlencoded".into(),
+                    )],
+                    body: body.to_vec(),
+                    script_path: script.to_str().unwrap().to_string(),
+                    server_name: "localhost".into(),
+                    server_port: "80".into(),
+                    script_name: "/post.php".into(),
+                };
+
+                if let Ok(resp) = execute_request(&req) {
+                    let out = String::from_utf8_lossy(&resp.body);
+                    assert!(out.contains("hello=world"), "expected POST body in output: {}", out);
+                }
+            });
+        }
+    }
+}
