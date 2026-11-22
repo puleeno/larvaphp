@@ -1,140 +1,161 @@
-//! PHP INI resolver for the embedded runtime (Strategy + Chain of Responsibility).
+//! PHP INI resolution (Strategy + Chain of Responsibility).
 //!
-//! The embedded PHP (`php8.dll`) does not automatically find `php.ini` when
-//! loaded from a non-PHP executable. This module resolves the php.ini path and
-//! builds fallback INI entries (for `extension_dir` / `extension=`) so
-//! extensions like `mysqli` load reliably.
+//! Resolves the `php.ini` file/directory plus the always-on `ini_entries`
+//! used by the embedded PHP runtime (FFI) and by the CGI/FastCGI transports.
 //!
-//! Design:
-//! - [`PhpIniResolver`] trait (Strategy) — each resolver knows how to find config.
-//! - [`EnvResolver`] — uses the `PHPRC` environment variable.
-//! - [`PathResolver`] — explicit candidate paths (e.g. the PHP install dir).
-//! - [`IniEntriesResolver`] — builds `key=value` INI entries as a fallback that
-//!   does not depend on a php.ini file existing.
-//! - [`ChainResolver`] — tries each resolver in order (Chain of Responsibility).
+//! Resolution order (first non-empty wins):
+//!   1. [`EnvResolver`]        — `LARVA_PHP_INI` / `PHPRC`
+//!   2. [`PathResolver`]       — scan well-known install directories
+//!   3. [`IniEntriesResolver`] — built-in defaults (opcache, extensions)
 
 use std::path::PathBuf;
 
-/// The resolved PHP configuration for the embedded runtime.
+/// Resolved PHP INI configuration.
 #[derive(Debug, Clone, Default)]
 pub struct PhpIniConfig {
-    /// Path to `php.ini` (passed via `php_ini_path_override`).
+    /// Directory containing `php.ini` (exported as `PHPRC`).
+    pub dir: Option<String>,
+    /// Full path to `php.ini` (used as `php_ini_path_override`).
     pub path: Option<PathBuf>,
-    /// Directory containing `php.ini` (passed via `PHPRC`).
-    pub dir: Option<PathBuf>,
-    /// Fallback INI entries (`key=value\n...`), applied via `ini_entries`.
+    /// Extra INI directives appended after the main file (`ini_entries`).
     pub entries: Option<String>,
 }
 
-/// Strategy: resolve PHP INI configuration.
-pub trait PhpIniResolver: Send + Sync {
-    fn name(&self) -> &str;
+/// A source of PHP INI configuration.
+pub trait PhpIniResolver {
+    /// Resolve this source into a (possibly empty) [`PhpIniConfig`].
     fn resolve(&self) -> PhpIniConfig;
 }
 
-/// Resolves via the `PHPRC` environment variable (directory containing php.ini).
+/// Resolves from the process environment.
+///
+/// * `LARVA_PHP_INI` — explicit path to a `php.ini` file.
+/// * `PHPRC`         — directory containing `php.ini`.
 pub struct EnvResolver;
 
 impl PhpIniResolver for EnvResolver {
-    fn name(&self) -> &str {
-        "env"
-    }
     fn resolve(&self) -> PhpIniConfig {
-        if let Ok(dir) = std::env::var("PHPRC") {
-            let dir = PathBuf::from(dir);
-            let ini = dir.join("php.ini");
-            if ini.exists() {
-                return PhpIniConfig {
-                    path: Some(ini),
-                    dir: Some(dir),
-                    entries: None,
-                };
+        let mut cfg = PhpIniConfig::default();
+
+        if let Ok(explicit) = std::env::var("LARVA_PHP_INI") {
+            let p = PathBuf::from(&explicit);
+            if p.is_file() {
+                cfg.path = Some(p.clone());
+                if let Some(parent) = p.parent() {
+                    cfg.dir = Some(parent.to_string_lossy().into_owned());
+                }
+                return cfg;
             }
         }
-        PhpIniConfig::default()
+
+        if let Ok(php_dir) = std::env::var("PHPRC") {
+            let dir = PathBuf::from(&php_dir);
+            let ini = dir.join("php.ini");
+            if ini.is_file() {
+                cfg.path = Some(ini);
+            }
+            cfg.dir = Some(php_dir);
+        }
+
+        cfg
     }
 }
 
-/// Resolves via a list of explicit candidate php.ini paths.
-pub struct PathResolver {
-    candidates: Vec<PathBuf>,
-}
-
-impl PathResolver {
-    pub fn new(candidates: Vec<PathBuf>) -> Self {
-        Self { candidates }
-    }
-}
+/// Resolves by scanning well-known install directories for `php.ini`.
+pub struct PathResolver;
 
 impl PhpIniResolver for PathResolver {
-    fn name(&self) -> &str {
-        "path"
-    }
     fn resolve(&self) -> PhpIniConfig {
-        for c in &self.candidates {
-            if c.exists() {
-                let dir = c.parent().map(|p| p.to_path_buf());
+        let mut candidates: Vec<PathBuf> = Vec::new();
+
+        // Windows: the standard PHP install layout.
+        #[cfg(windows)]
+        {
+            candidates.push(PathBuf::from(r"C:\Program Files\PHP\current"));
+            if let Ok(root) = std::env::var("SystemDrive") {
+                candidates.push(PathBuf::from(format!("{root}\\php")));
+            }
+        }
+
+        // Unix: common system locations.
+        #[cfg(not(windows))]
+        {
+            candidates.push(PathBuf::from("/etc/php.ini"));
+            candidates.push(PathBuf::from("/usr/local/etc/php.ini"));
+            candidates.push(PathBuf::from("/etc/php/8.3/cli/php.ini"));
+        }
+
+        for dir in candidates {
+            let ini = dir.join("php.ini");
+            if ini.is_file() {
                 return PhpIniConfig {
-                    path: Some(c.clone()),
-                    dir,
+                    dir: Some(dir.to_string_lossy().into_owned()),
+                    path: Some(ini),
                     entries: None,
                 };
             }
         }
+
         PhpIniConfig::default()
     }
 }
 
-/// Builds fallback INI entries so extensions load even without a php.ini file.
+/// Always-on INI directives, most importantly **opcache**.
 ///
-/// This reads the `extension_dir` from a discovered php.ini (if any) and emits
-/// `extension=<name>` entries for the requested extensions.
-pub struct IniEntriesResolver {
-    /// Extensions to enable (e.g. `["mysqli", "pdo_mysql"]`).
-    extensions: Vec<String>,
-}
+/// Without these, every request recompiles all PHP bytecode from scratch, which
+/// is the dominant cost for a CMS such as WordPress (~700 ms vs ~100 ms).
+///
+/// `opcache.file_cache` is what makes the cache survive across the short-lived
+/// `php-cgi.exe` processes spawned by the CGI transport: compiled bytecode is
+/// persisted to disk and reloaded instead of being recompiled.
+pub struct IniEntriesResolver;
 
 impl IniEntriesResolver {
-    pub fn new(extensions: Vec<String>) -> Self {
-        Self { extensions }
+    /// Directory used for the persistent opcache file cache.
+    pub fn file_cache_dir() -> PathBuf {
+        std::env::temp_dir().join("larva-php-opcache")
+    }
+
+    /// Build the default `ini_entries` string.
+    pub fn entries() -> String {
+        let cache_dir = Self::file_cache_dir();
+        let _ = std::fs::create_dir_all(&cache_dir);
+
+        let mut entries = String::new();
+        // Load the opcache Zend extension. It must be loaded before any
+        // opcache.* directives are parsed; `extension_dir` comes from the
+        // main php.ini which PHP reads before the scan directory.
+        entries.push_str("zend_extension=php_opcache.dll\n");
+        entries.push_str("opcache.enable=1\n");
+        entries.push_str("opcache.enable_cli=1\n");
+        // Persist compiled bytecode so it is reused across processes.
+        entries.push_str(&format!("opcache.file_cache={}\n", cache_dir.to_string_lossy()));
+        // Prefer the shared-memory cache, fall back to the file cache.
+        entries.push_str("opcache.file_cache_only=0\n");
+        // Never re-check mtimes: production semantics, biggest win.
+        entries.push_str("opcache.validate_timestamps=0\n");
+        entries.push_str("opcache.revalidate_freq=0\n");
+        entries.push_str("opcache.memory_consumption=512\n");
+        entries.push_str("opcache.interned_strings_buffer=32\n");
+        entries.push_str("opcache.max_accelerated_files=100000\n");
+        entries.push_str("opcache.save_comments=1\n");
+        entries.push_str("opcache.fast_shutdown=1\n");
+        entries
     }
 }
 
 impl PhpIniResolver for IniEntriesResolver {
-    fn name(&self) -> &str {
-        "entries"
-    }
     fn resolve(&self) -> PhpIniConfig {
-        let mut entries = String::new();
-        // Discover extension_dir from a php.ini, if present.
-        if let Some(ini) = find_php_ini() {
-            if let Ok(content) = std::fs::read_to_string(&ini) {
-                for line in content.lines() {
-                    let line = line.trim();
-                    if let Some(rest) = line.strip_prefix("extension_dir") {
-                        if let Some(val) = rest.split('=').nth(1) {
-                            let val = val.trim().trim_matches('"');
-                            if !val.is_empty() {
-                                entries.push_str(&format!("extension_dir=\"{}\"\n", val));
-                            }
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-        for ext in &self.extensions {
-            entries.push_str(&format!("extension={}\n", ext));
-        }
         PhpIniConfig {
-            path: None,
             dir: None,
-            entries: Some(entries),
+            path: None,
+            entries: Some(Self::entries()),
         }
     }
 }
 
-/// Chain of Responsibility: try each resolver, merge results.
+/// Chains several resolvers; later sources fill in fields the earlier ones
+/// left empty.
 pub struct ChainResolver {
     resolvers: Vec<Box<dyn PhpIniResolver>>,
 }
@@ -143,62 +164,39 @@ impl ChainResolver {
     pub fn new(resolvers: Vec<Box<dyn PhpIniResolver>>) -> Self {
         Self { resolvers }
     }
+
+    /// The default chain: environment → well-known paths → built-in entries.
+    pub fn default_chain() -> Self {
+        Self::new(vec![
+            Box::new(EnvResolver),
+            Box::new(PathResolver),
+            Box::new(IniEntriesResolver),
+        ])
+    }
 }
 
 impl PhpIniResolver for ChainResolver {
-    fn name(&self) -> &str {
-        "chain"
-    }
     fn resolve(&self) -> PhpIniConfig {
-        let mut merged = PhpIniConfig::default();
+        let mut out = PhpIniConfig::default();
         for r in &self.resolvers {
-            let c = r.resolve();
-            if merged.path.is_none() {
-                merged.path = c.path;
+            let cfg = r.resolve();
+            if out.dir.is_none() {
+                out.dir = cfg.dir;
             }
-            if merged.dir.is_none() {
-                merged.dir = c.dir;
+            if out.path.is_none() {
+                out.path = cfg.path;
             }
-            if merged.entries.is_none() {
-                merged.entries = c.entries;
+            if out.entries.is_none() {
+                out.entries = cfg.entries;
             }
         }
-        merged
+        out
     }
 }
 
-/// Locate `php.ini` from common Windows locations.
-fn find_php_ini() -> Option<PathBuf> {
-    for c in [
-        r"C:\Program Files\PHP\current\php.ini",
-        r"C:\Program Files\PHP\8.3.33\nts\x64\php.ini",
-    ] {
-        let p = PathBuf::from(c);
-        if p.exists() {
-            return Some(p);
-        }
-    }
-    None
-}
-
-/// Build the default resolver chain for the embedded runtime.
-pub fn default_resolver() -> impl PhpIniResolver {
-    ChainResolver::new(vec![
-        Box::new(EnvResolver),
-        Box::new(PathResolver::new(vec![
-            PathBuf::from(r"C:\Program Files\PHP\current\php.ini"),
-            PathBuf::from(r"C:\Program Files\PHP\8.3.33\nts\x64\php.ini"),
-        ])),
-        Box::new(IniEntriesResolver::new(vec![
-            "mysqli".to_string(),
-            "pdo_mysql".to_string(),
-        ])),
-    ])
-}
-
-/// Resolve the PHP INI configuration using the default resolver chain.
+/// Resolve the effective PHP INI configuration using the default chain.
 pub fn resolve() -> PhpIniConfig {
-    default_resolver().resolve()
+    ChainResolver::default_chain().resolve()
 }
 
 #[cfg(test)]
@@ -206,30 +204,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_resolver_returns_config() {
+    fn entries_enable_opcache() {
+        let entries = IniEntriesResolver::entries();
+        assert!(entries.contains("opcache.enable=1"));
+        assert!(entries.contains("opcache.file_cache="));
+        assert!(entries.contains("opcache.validate_timestamps=0"));
+    }
+
+    #[test]
+    fn file_cache_dir_is_absolute() {
+        let dir = IniEntriesResolver::file_cache_dir();
+        assert!(dir.is_absolute());
+    }
+
+    #[test]
+    fn chain_includes_opcache_entries() {
         let cfg = resolve();
-        // On a system with PHP, path or entries should be populated.
-        // The entries resolver always returns Some (even if empty-ish).
-        assert!(cfg.path.is_some() || cfg.entries.is_some());
+        let entries = cfg.entries.expect("entries must always be present");
+        assert!(entries.contains("opcache.enable=1"));
     }
 
     #[test]
-    fn entries_resolver_includes_extensions() {
-        let r = IniEntriesResolver::new(vec!["mysqli".to_string()]);
-        let cfg = r.resolve();
-        let entries = cfg.entries.unwrap();
-        assert!(entries.contains("extension=mysqli"));
-    }
-
-    #[test]
-    fn chain_resolver_merges() {
-        let r = ChainResolver::new(vec![
-            Box::new(PathResolver::new(vec![PathBuf::from("/nonexistent/php.ini")])),
-            Box::new(IniEntriesResolver::new(vec!["mysqli".to_string()])),
-        ]);
-        let cfg = r.resolve();
-        // Path not found -> entries populated.
-        assert!(cfg.path.is_none());
+    fn chain_preserves_earlier_values() {
+        let chain = ChainResolver::new(vec![Box::new(IniEntriesResolver)]);
+        let cfg = chain.resolve();
         assert!(cfg.entries.is_some());
+        assert!(cfg.path.is_none());
     }
 }

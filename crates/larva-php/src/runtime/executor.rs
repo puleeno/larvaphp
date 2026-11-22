@@ -100,6 +100,15 @@ impl PhpExecutor for CgiExecutor {
         cmd.env("SCRIPT_FILENAME", &req.script_path);
         cmd.env("REDIRECT_STATUS", "200");
         cmd.env("GATEWAY_INTERFACE", "CGI/1.1");
+        // Identify as FrankenPHP-compatible so WordPress' got_url_rewrite()
+        // ($is_caddy) reports pretty permalinks / dynamic robots.txt as supported.
+        cmd.env("SERVER_SOFTWARE", "LarvaPHP/1.13.5 (FrankenPHP-compatible)");
+        // Always apply the built-in ini overrides (opcache with a persistent
+        // file cache) so this per-request spawn reuses compiled bytecode
+        // instead of recompiling it on every request.
+        if let Some(dir) = crate::server::write_ini_overrides(&Default::default()) {
+            cmd.env("PHP_INI_SCAN_DIR", &dir);
+        }
         let mut has_content_length = false;
         let mut has_content_type = false;
         for (k, v) in &req.headers {

@@ -44,6 +44,30 @@ pub fn alt_svc_header() -> Option<String> {
     }
 }
 
+/// Compute the IPv6 address that mirrors an IPv4 bind, if any.
+///
+/// * `127.0.0.1:port`  → `[::1]:port`
+/// * `0.0.0.0:port`    → `[::]:port`
+/// * anything else     → `None` (cannot be mapped)
+///
+/// Binding both lets `localhost` (which resolves to `::1` first on Windows)
+/// reach a server started on the IPv4 loopback address.
+fn ipv6_equivalent(addr: SocketAddr) -> Option<SocketAddr> {
+    match addr.ip() {
+        std::net::IpAddr::V4(v4) => {
+            let ip6 = if v4.is_loopback() {
+                std::net::Ipv6Addr::LOCALHOST
+            } else if v4.is_unspecified() {
+                std::net::Ipv6Addr::UNSPECIFIED
+            } else {
+                return None;
+            };
+            Some(SocketAddr::new(std::net::IpAddr::V6(ip6), addr.port()))
+        }
+        std::net::IpAddr::V6(_) => None,
+    }
+}
+
 /// A preconfigured server block.
 ///
 /// Requests and workers can be scoped to a Server.
@@ -328,6 +352,34 @@ impl Server {
             .find_worker_by_request(&req)
             .map(|w| w.file_name().to_string());
 
+// Serve robots.txt directly (bypass PHP/front-controller fallback).
+        // This must happen BEFORE resolve_script_path (which would append .php).
+        let uri_path = req.uri().path().split('?').next().unwrap_or("");
+        if uri_path == "/robots.txt" || uri_path.ends_with("/robots.txt") {
+            let robots_path = PathBuf::from(&self.root).join("robots.txt");
+            if robots_path.exists() {
+                if let Ok(content) = tokio::fs::read(&robots_path).await {
+                    return Ok(Response::builder()
+                        .status(StatusCode::OK)
+                        .header("content-type", "text/plain; charset=UTF-8")
+                        .header("content-length", content.len().to_string())
+                        .header("server", "LarvaPHP")
+                        .body(Full::new(Bytes::from(content)))
+                        .unwrap());
+                }
+            }
+            // No robots.txt on disk — serve a permissive default
+            // so WordPress doesn't try to generate one.
+            let default = b"User-agent: *\nDisallow: /\n";
+            return Ok(Response::builder()
+                .status(StatusCode::OK)
+                .header("content-type", "text/plain; charset=UTF-8")
+                .header("content-length", default.len().to_string())
+                .header("server", "LarvaPHP")
+                .body(Full::new(Bytes::from(default.to_vec())))
+                .unwrap());
+        }
+
         // Determine the script filename
         let script_path = if let Some(ws) = worker_script {
             ws
@@ -356,6 +408,28 @@ impl Server {
             if ext.to_string_lossy() != "php" {
                 return self.serve_static_file(&script_path).await;
             }
+        }
+
+        // Serve robots.txt directly (bypass PHP/front-controller fallback).
+        if script_path.ends_with("robots.txt") {
+            let robots_path = PathBuf::from(&self.root).join("robots.txt");
+            if robots_path.exists() {
+                if let Ok(content) = tokio::fs::read(&robots_path).await {
+                    return Ok(Response::builder()
+                        .status(StatusCode::OK)
+                        .header("content-type", "text/plain; charset=UTF-8")
+                        .header("content-length", content.len().to_string())
+                        .header("server", "LarvaPHP")
+                        .body(Full::new(Bytes::from(content)))
+                        .unwrap());
+                }
+            }
+            // No robots.txt — fall through to 404.
+            return Ok(Response::builder()
+                .status(StatusCode::NOT_FOUND)
+                .header("server", "LarvaPHP")
+                .body(Full::new(Bytes::from("Not Found")))
+                .unwrap());
         }
 
         // Read request body (drain the stream so hyper doesn't hang)
@@ -412,6 +486,36 @@ impl Server {
         req_headers: &[(String, String)],
         body: &[u8],
     ) -> Result<(StatusCode, Vec<(String, String)>, Vec<u8>)> {
+// Serve robots.txt directly (bypass PHP/front-controller fallback).
+        // This must happen BEFORE resolve_script_path (which would append .php).
+        let uri_path = uri.split('?').next().unwrap_or("");
+        if uri_path == "/robots.txt" || uri_path.ends_with("/robots.txt") {
+            let robots_path = PathBuf::from(&self.root).join("robots.txt");
+            if robots_path.exists() {
+                if let Ok(content) = std::fs::read(&robots_path) {
+                    return Ok((
+                        StatusCode::OK,
+                        vec![
+                            ("content-type".to_string(), "text/plain; charset=UTF-8".to_string()),
+                            ("content-length".to_string(), content.len().to_string()),
+                            ("server".to_string(), "LarvaPHP".to_string()),
+                        ],
+                        content,
+                    ));
+                }
+            }
+            let default = b"User-agent: *\nDisallow: /\n".to_vec();
+            return Ok((
+                StatusCode::OK,
+                vec![
+                    ("content-type".to_string(), "text/plain; charset=UTF-8".to_string()),
+                    ("content-length".to_string(), default.len().to_string()),
+                    ("server".to_string(), "LarvaPHP".to_string()),
+                ],
+                default,
+            ));
+        }
+
         // Resolve the script path.
         let script_path = self.resolve_script_path(uri)?;
         let script_path = if !std::path::Path::new(&script_path).exists() {
@@ -638,11 +742,29 @@ impl Server {
     /// Start the HTTP server listening on the given address.
     pub async fn start_server(&self, addr: SocketAddr) -> Result<()> {
         self.activate();
-        info!("LarvaPHP server listening on http://{}", addr);
 
         let listener = TcpListener::bind(addr)
             .await
             .map_err(|e| Error::Io(e))?;
+        info!("LarvaPHP server listening on http://{}", addr);
+
+        // Dual-stack: also listen on the IPv6 equivalent of an IPv4 bind so
+        // `localhost` works. On Windows `localhost` resolves to `::1` first,
+        // and a browser that does not fall back to IPv4 would otherwise fail
+        // to connect ("can't connect to the server at localhost:8000").
+        let v6_listener = match ipv6_equivalent(addr) {
+            Some(addr6) => match TcpListener::bind(addr6).await {
+                Ok(l) => {
+                    info!("LarvaPHP server also listening on http://{}", addr6);
+                    Some(l)
+                }
+                Err(e) => {
+                    tracing::debug!("IPv6 listener on {} unavailable: {}", addr6, e);
+                    None
+                }
+            },
+            None => None,
+        };
         let server_root = self.root.clone();
         let server_split_path = self.split_path.clone();
         // Snapshot worker matchers and php.ini once (Flyweight: shared via Arc).
@@ -651,7 +773,21 @@ impl Server {
         let server_php_ini: Arc<HashMap<String, String>> = Arc::new(self.php_ini.clone());
 
         loop {
-            let (stream, _) = listener.accept().await.map_err(|e| Error::Io(e))?;
+            // Accept from either the IPv4 or IPv6 listener (whichever fires).
+            let accepted = {
+                let accept_v4 = listener.accept();
+                let accept_v6 = async {
+                    match &v6_listener {
+                        Some(l) => l.accept().await,
+                        None => std::future::pending().await,
+                    }
+                };
+                tokio::select! {
+                    res = accept_v4 => res,
+                    res = accept_v6 => res,
+                }
+            };
+            let (stream, _) = accepted.map_err(|e| Error::Io(e))?;
             let peer_addr = stream.peer_addr().map_err(|e| Error::Io(e))?;
 
             let root = server_root.clone();
@@ -701,53 +837,117 @@ impl Server {
                                     }
                                 }
 
-                                let script_path = if let Some(ws) = worker_script {
-                                    Some(ws)
-                                } else {
-                                    let resolved =
-                                        resolve_script_path_static(&uri, &root, &split_path);
+// Serve robots.txt directly (bypass PHP/front-controller fallback).
+        // This must happen BEFORE resolve_script_path (which would append .php).
+        let uri_path = uri.split('?').next().unwrap_or("");
+        if uri_path == "/robots.txt" || uri_path.ends_with("/robots.txt") {
+            let robots_path = PathBuf::from(&root).join("robots.txt");
+            if robots_path.exists() {
+                if let Ok(content) = tokio::fs::read(&robots_path).await {
+                    return Ok::<Response<Full<Bytes>>, hyper::Error>(
+                        Response::builder()
+                            .status(StatusCode::OK)
+                            .header("content-type", "text/plain; charset=UTF-8")
+                            .header("content-length", content.len().to_string())
+                            .header("server", "LarvaPHP")
+                            .body(Full::new(Bytes::from(content)))
+                            .unwrap(),
+                    );
+                }
+            }
+            // No robots.txt on disk — serve a permissive default
+            // so WordPress doesn't try to generate one.
+            let default = b"User-agent: *\nDisallow: /\n";
+            return Ok::<Response<Full<Bytes>>, hyper::Error>(
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .header("content-type", "text/plain; charset=UTF-8")
+                    .header("content-length", default.len().to_string())
+                    .header("server", "LarvaPHP")
+                    .body(Full::new(Bytes::from(default.to_vec())))
+                    .unwrap(),
+            );
+        }
 
-                                    // try_files fallback: if the resolved path doesn't
-                                    // exist (or is a directory without index), fall back
-                                    // to index.php (front controller / permalink support).
-                                    // Static assets (.ico, .css, .js, images) that don't
-                                    // exist return 404 instead (no front-controller
-                        // fallback), which avoids WordPress building wrong redirect URLs
-                        // like /favicon.ico/wp-admin/install.php.
-                        if let Some(ref p) = resolved {
-                            if std::path::Path::new(p).exists() {
-                                resolved
-                            } else {
-                                let is_static = std::path::Path::new(p)
-                                    .extension()
-                                    .map(|e| e.to_string_lossy() != "php")
-                                    .unwrap_or(false);
-                                if is_static {
-                                    return Ok::<Response<Full<Bytes>>, hyper::Error>(
-                                        Response::builder()
-                                            .status(StatusCode::NOT_FOUND)
-                                            .header("server", "LarvaPHP")
-                                            .body(Full::new(Bytes::from("Not Found")))
-                                            .unwrap(),
-                                    );
-                                }
-                                resolve_index_php_static(&uri, &root)
-                            }
-                        } else {
-                            resolve_index_php_static(&uri, &root)
-                        }
-                                };
+// Serve robots.txt directly (bypass PHP/front-controller fallback).
+        // This must happen BEFORE resolve_script_path (which would append .php).
+        let uri_path = uri.split('?').next().unwrap_or("");
+        if uri_path == "/robots.txt" || uri_path.ends_with("/robots.txt") {
+            let robots_path = PathBuf::from(&root).join("robots.txt");
+            if robots_path.exists() {
+                if let Ok(content) = std::fs::read(&robots_path) {
+                    return Ok::<Response<Full<Bytes>>, hyper::Error>(
+                        Response::builder()
+                            .status(StatusCode::OK)
+                            .header("content-type", "text/plain; charset=UTF-8")
+                            .header("content-length", content.len().to_string())
+                            .header("server", "LarvaPHP")
+                            .body(Full::new(Bytes::from(content)))
+                            .unwrap(),
+                    );
+                }
+            }
+            // No robots.txt on disk — serve a permissive default
+            // so WordPress doesn't try to generate one.
+            let default = b"User-agent: *\nDisallow: /\n";
+            return Ok::<Response<Full<Bytes>>, hyper::Error>(
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .header("content-type", "text/plain; charset=UTF-8")
+                    .header("content-length", default.len().to_string())
+                    .header("server", "LarvaPHP")
+                    .body(Full::new(Bytes::from(default.to_vec())))
+                    .unwrap(),
+            );
+        }
 
-                                let Some(path) = script_path else {
-                                    return Ok::<Response<Full<Bytes>>, hyper::Error>(
-                                        Response::builder()
-                                            .status(StatusCode::NOT_FOUND)
-                                            .body(Full::new(Bytes::from("Not Found")))
-                                            .unwrap(),
-                                    );
-                                };
+        let script_path = if let Some(ws) = worker_script {
+            Some(ws)
+        } else {
+            let resolved =
+                resolve_script_path_static(&uri, &root, &split_path);
 
-                                // Serve static files directly (not .php)
+            // try_files fallback: if the resolved path doesn't
+            // exist (or is a directory without index), fall back
+            // to index.php (front controller / permalink support).
+            // Static assets (.ico, .css, .js, images) that don't
+            // exist return 404 instead (no front-controller
+            // fallback), which avoids WordPress building wrong redirect URLs
+            // like /favicon.ico/wp-admin/install.php.
+            if let Some(ref p) = resolved {
+                if std::path::Path::new(p).exists() {
+                    resolved
+                } else {
+                    let is_static = std::path::Path::new(p)
+                        .extension()
+                        .map(|e| e.to_string_lossy() != "php")
+                        .unwrap_or(false);
+                    if is_static {
+                        return Ok::<Response<Full<Bytes>>, hyper::Error>(
+                            Response::builder()
+                                .status(StatusCode::NOT_FOUND)
+                                .header("server", "LarvaPHP")
+                                .body(Full::new(Bytes::from("Not Found")))
+                                .unwrap(),
+                        );
+                    }
+                    resolve_index_php_static(&uri, &root)
+                }
+            } else {
+                resolve_index_php_static(&uri, &root)
+            }
+        };
+
+        let Some(path) = script_path else {
+            return Ok::<Response<Full<Bytes>>, hyper::Error>(
+                Response::builder()
+                    .status(StatusCode::NOT_FOUND)
+                    .body(Full::new(Bytes::from("Not Found")))
+                    .unwrap(),
+            );
+        };
+
+        // Serve static files directly (not .php)
                                 if let Some(ext) = std::path::Path::new(&path).extension() {
                                     if ext.to_string_lossy() != "php" {
                                         // Block sensitive files
@@ -1041,8 +1241,33 @@ pub fn find_php_cgi() -> Option<String> {
 /// Write php.ini overrides to a temp directory (for PHP_INI_SCAN_DIR).
 /// The directory is created once per unique override set and cached, so
 /// per-request cost is a hash lookup + mutex (no disk I/O after first write).
-fn write_ini_overrides(php_ini: &HashMap<String, String>) -> Option<std::path::PathBuf> {
-    if php_ini.is_empty() {
+///
+/// The built-in [`crate::runtime::php_ini::IniEntriesResolver`] entries are
+/// always prepended. They enable **opcache** with a persistent file cache,
+/// which is what turns a ~900 ms first request into ~100 ms warm requests:
+/// bytecode is compiled once and reused instead of being recompiled per request.
+pub(crate) fn write_ini_overrides(php_ini: &HashMap<String, String>) -> Option<std::path::PathBuf> {
+    // Built-in entries first, in their declared order. Order matters:
+    // `zend_extension=php_opcache.dll` must precede the `opcache.*` directives
+    // that configure it.
+    let built_in = crate::runtime::php_ini::IniEntriesResolver::entries();
+    // Caller-supplied overrides, sorted by key for a deterministic file.
+    let mut user: Vec<(&String, &String)> = php_ini.iter().collect();
+    user.sort_by(|a, b| a.0.cmp(b.0));
+    let user_str: String = user
+        .iter()
+        .map(|(k, v)| format!("{}={}", k, v))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let overrides = if user_str.is_empty() {
+        built_in
+    } else if built_in.is_empty() {
+        user_str
+    } else {
+        format!("{}\n{}", built_in, user_str)
+    };
+    if overrides.trim().is_empty() {
         return None;
     }
 
@@ -1050,14 +1275,6 @@ fn write_ini_overrides(php_ini: &HashMap<String, String>) -> Option<std::path::P
     use std::hash::{Hash, Hasher};
 
     // Deterministic content + cache key.
-    let mut keys: Vec<&String> = php_ini.keys().collect();
-    keys.sort_unstable();
-    let overrides: String = keys
-        .iter()
-        .filter_map(|k| php_ini.get(*k).map(|v| format!("{}={}", k, v)))
-        .collect::<Vec<_>>()
-        .join("\n");
-
     let mut hasher = DefaultHasher::new();
     overrides.hash(&mut hasher);
     let key = hasher.finish();
@@ -1135,7 +1352,7 @@ fn execute_php_cgi(
     params.push(("PHP_SELF".into(), script_name.clone()));
     params.push(("REDIRECT_STATUS".into(), "200".into()));
     params.push(("GATEWAY_INTERFACE".into(), "CGI/1.1".into()));
-    params.push(("SERVER_SOFTWARE".into(), "LarvaPHP/1.0".into()));
+    params.push(("SERVER_SOFTWARE".into(), "LarvaPHP/1.13.5 (FrankenPHP-compatible)".into()));
     // HTTP_HOST (Host header) so WordPress/URLs resolve to the right host.
     let http_host = if ctx.server_port.is_empty()
         || ctx.server_port == "80"
@@ -1248,6 +1465,8 @@ params.push(("HTTP_HOST".into(), http_host.clone()));
         .ok_or_else(|| Error::Ffi("php-cgi.exe not found".to_string()))?;
 
     let mut cmd = std::process::Command::new(php_exe);
+    // Pass the script path as a positional argument (php-cgi requires it).
+    cmd.arg(&native_script_str);
     cmd.current_dir(
         native_script
             .parent()

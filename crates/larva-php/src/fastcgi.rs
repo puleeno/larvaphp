@@ -160,12 +160,20 @@ pub mod imp {
                 .parse()
                 .map_err(|e| Error::Ffi(format!("invalid fastcgi addr: {}", e)))?;
 
-            let child = Command::new(php_exe)
-                .arg("-b")
+            let mut cmd = Command::new(php_exe);
+            cmd.arg("-b")
                 .arg(format!("{}:{}", addr.ip(), addr.port()))
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+            // Load opcache (with a persistent file cache) into the long-lived
+            // backend. Because this process outlives requests, opcache's shared
+            // memory stays warm across requests — the closest we get to
+            // FrankenPHP's in-process PHP without the embedded FFI path.
+            if let Some(dir) = crate::server::write_ini_overrides(&Default::default()) {
+                cmd.env("PHP_INI_SCAN_DIR", &dir);
+            }
+            let child = cmd
                 .spawn()
                 .map_err(|e| Error::Ffi(format!("failed to spawn php-cgi -b: {}", e)))?;
 
