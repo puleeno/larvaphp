@@ -38,7 +38,7 @@ memmap2 = { workspace = true }
 num_cpus = { workspace = true }
 
 [features]
-default = ["mercure", "watcher"]
+default = ["mercure", "watcher", "fcgi"]
 mercure = []
 watcher = ["notify", "tokio-util"]
 hotreload = ["mercure", "watcher"]

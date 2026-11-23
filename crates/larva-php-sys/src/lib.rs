@@ -15,6 +15,66 @@ pub mod ffi;
 
 pub use ffi::*;
 
+// ---------------------------------------------------------------------------
+// Embedded PHP SAPI shim (larva_embed.c, compiled by build.rs).
+//
+// All PHP entry points are resolved dynamically from php8.dll inside the shim,
+// so no import library or PHP headers are needed to link.
+// ---------------------------------------------------------------------------
+extern "C" {
+    pub fn larva_embed_init(php_ini_path: *const std::os::raw::c_char, ini_entries: *const std::os::raw::c_char) -> std::os::raw::c_int;
+    pub fn larva_embed_is_ready() -> std::os::raw::c_int;
+    pub fn larva_embed_execute(
+        script_path: *const std::os::raw::c_char,
+        out_buf: *mut std::os::raw::c_char,
+        out_cap: std::os::raw::c_int,
+        out_len: *mut std::os::raw::c_int,
+    ) -> std::os::raw::c_int;
+    pub fn larva_embed_shutdown();
+
+    // ---- Request context (HTTP serving) ----
+
+    pub fn larva_embed_execute_request(
+        script_path: *const std::os::raw::c_char,
+        req: *const LarvaEmbedRequest,
+        resp: *mut LarvaEmbedResponse,
+    ) -> std::os::raw::c_int;
+
+    pub fn larva_embed_response_free(resp: *mut LarvaEmbedResponse);
+}
+
+/// A single "KEY=VALUE" server variable for $_SERVER.
+#[repr(C)]
+pub struct LarvaEmbedServerVar {
+    pub key: *const std::os::raw::c_char,
+    pub value: *const std::os::raw::c_char,
+}
+
+/// Request description passed to `larva_embed_execute_request`.
+#[repr(C)]
+pub struct LarvaEmbedRequest {
+    pub method: *const std::os::raw::c_char,
+    pub request_uri: *const std::os::raw::c_char,
+    pub query_string: *const std::os::raw::c_char,
+    pub content_type: *const std::os::raw::c_char,
+    pub content_length: std::os::raw::c_long,
+    pub body: *const std::os::raw::c_char,
+    pub body_len: std::os::raw::c_long,
+    pub cookie_data: *const std::os::raw::c_char,
+    pub server_vars: *const LarvaEmbedServerVar,
+    pub server_vars_count: std::os::raw::c_int,
+}
+
+/// Response returned from `larva_embed_execute_request`.
+#[repr(C)]
+pub struct LarvaEmbedResponse {
+    pub status: std::os::raw::c_int,
+    pub headers: *mut std::os::raw::c_char,
+    pub headers_len: std::os::raw::c_int,
+    pub body: *mut std::os::raw::c_char,
+    pub body_len: std::os::raw::c_int,
+}
+
 /// PHP version constants
 pub const PHP_VERSION_ID: i32 = 80500;
 

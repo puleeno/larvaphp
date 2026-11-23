@@ -125,6 +125,9 @@ HTTP calls, etc.) is the cause.
 
 ## See also
 
+- [`php-abi-structures.md`](php-abi-structures.md) — PHP SAPI structs and how to
+  extract peak throughput (opcache, NTS multi-process, zero-copy)
+- [`embedded-php.md`](embedded-php.md) — in-process PHP runtime (no CGI spawn)
 - [`architecture.md`](architecture.md) — module breakdown
 - [`http3.md`](http3.md) — HTTP/3 transport
 - [`configuration.md`](configuration.md) — config formats
