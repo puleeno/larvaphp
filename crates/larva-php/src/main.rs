@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::Parser;
@@ -53,6 +54,40 @@ struct Args {
     /// Path to a TLS private key (PEM) for HTTP/3. Auto-generated if missing.
     #[arg(long = "key", value_name = "FILE")]
     key: Option<String>,
+
+    /// Enable Let's Encrypt automatic certificate provisioning (ACME v2,
+    /// HTTP-01 challenge). Requires --features acme.
+    #[arg(long = "lets-encrypt", short = 'L')]
+    lets_encrypt: bool,
+
+    /// Contact email for the Let's Encrypt account (required with
+    /// --lets-encrypt).
+    #[arg(long = "acme-email", value_name = "EMAIL")]
+    acme_email: Option<String>,
+
+    /// Comma-separated list of domains for the certificate (required with
+    /// --lets-encrypt).
+    #[arg(long = "acme-domains", value_name = "DOMAINS")]
+    acme_domains: Option<String>,
+
+    /// Directory to store Let's Encrypt account key and certificates.
+    #[arg(long = "acme-dir", value_name = "DIR")]
+    acme_dir: Option<String>,
+
+    /// Directory where HTTP-01 challenge tokens are written. The HTTP server
+    /// must serve this at /.well-known/acme-challenge/. Defaults to
+    /// <root>/.well-known/acme-challenge.
+    #[arg(long = "acme-challenge-dir", value_name = "DIR")]
+    acme_challenge_dir: Option<String>,
+
+    /// Use Let's Encrypt staging server (not trusted by browsers, useful for
+    /// testing).
+    #[arg(long = "acme-staging")]
+    acme_staging: bool,
+
+    /// Renew certificate when this many days (or fewer) remain before expiry.
+    #[arg(long = "acme-renew-days", value_name = "DAYS", default_value = "30")]
+    acme_renew_days: u32,
 
     /// Show version information
     #[arg(short = 'v', long = "version")]
@@ -338,22 +373,111 @@ fn main() -> ExitCode {
         // Optionally start the HTTP/3 (QUIC/UDP) listener on the same port.
         // Browsers that don't support HTTP/3 transparently keep using the TCP
         // server (HTTP/2 / HTTP/1.1).
+        //
+        // If --lets-encrypt is set, obtain a certificate via ACME first. The
+        // HTTP-01 challenge tokens are served from the challenge directory
+        // (default: <root>/.well-known/acme-challenge/), so the HTTP server
+        // must be reachable on port 80 for validation.
+        let h3_addr = std::net::SocketAddr::new(addr.ip(), addr.port()).to_string();
+        let (h3_cert, h3_key) = match (args.cert.clone(), args.key.clone()) {
+            (Some(c), Some(k)) => (c, k),
+            _ => {
+                let dir = std::env::temp_dir();
+                let c = dir.join("larva-php-cert.pem").to_string_lossy().to_string();
+                let k = dir.join("larva-php-key.pem").to_string_lossy().to_string();
+                (c, k)
+            }
+        };
+
         #[cfg(feature = "http3")]
-        if args.http3 {
-            let h3_addr = std::net::SocketAddr::new(addr.ip(), addr.port()).to_string();
-            let (cert, key) = match (args.cert.clone(), args.key.clone()) {
-                (Some(c), Some(k)) => (c, k),
-                _ => {
-                    let dir = std::env::temp_dir();
-                    let c = dir.join("larva-php-cert.pem").to_string_lossy().to_string();
-                    let k = dir.join("larva-php-key.pem").to_string_lossy().to_string();
-                    (c, k)
+        if args.http3 || args.lets_encrypt {
+            // Obtain a Let's Encrypt certificate if requested.
+            let (le_cert, le_key) = if args.lets_encrypt {
+                if args.acme_email.is_none() || args.acme_domains.is_none() {
+                    eprintln!(
+                        "--lets-encrypt requires --acme-email and --acme-domains"
+                    );
+                    return ExitCode::from(1);
                 }
+                let email = args.acme_email.as_deref().unwrap();
+                let domains: Vec<String> = args
+                    .acme_domains
+                    .as_deref()
+                    .unwrap_or("")
+                    .split(',')
+                    .map(|d| d.trim().to_string())
+                    .filter(|d| !d.is_empty())
+                    .collect();
+                if domains.is_empty() {
+                    eprintln!("--acme-domains must not be empty");
+                    return ExitCode::from(1);
+                }
+                let cert_dir = args
+                    .acme_dir
+                    .as_deref()
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| {
+                        std::env::home_dir()
+                            .unwrap_or_else(|| PathBuf::from("."))
+                            .join(".larva-php")
+                            .join("letsencrypt")
+                    });
+                let challenge_dir = args
+                    .acme_challenge_dir
+                    .as_deref()
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| {
+                        PathBuf::from(&root).join(".well-known/acme-challenge")
+                    });
+
+                #[cfg(feature = "acme")]
+                {
+                    match obtain_lets_encrypt_certs(
+                        email,
+                        &domains,
+                        &cert_dir,
+                        &challenge_dir,
+                        args.acme_staging,
+                        args.acme_renew_days,
+                    )
+                    .await
+                    {
+                        Ok(result) => {
+                            tracing::info!(
+                                "Let's Encrypt certificate obtained: {:?}",
+                                result.cert_path
+                            );
+                            (
+                                result.cert_path.to_string_lossy().to_string(),
+                                result.key_path.to_string_lossy().to_string(),
+                            )
+                        }
+                        Err(e) => {
+                            eprintln!("Let's Encrypt certificate failed: {}", e);
+                            return ExitCode::from(1);
+                        }
+                    }
+                }
+                #[cfg(not(feature = "acme"))]
+                {
+                    eprintln!(
+                        "--lets-encrypt requires building with --features acme"
+                    );
+                    return ExitCode::from(1);
+                }
+            } else {
+                (h3_cert.clone(), h3_key.clone())
             };
+
             let server_arc = std::sync::Arc::new(larva_php::server::Server::new(&root).unwrap());
-            match larva_php::http3::ensure_cert(&cert, &key) {
+            match larva_php::http3::ensure_cert(&le_cert, &le_key) {
                 Ok((cert, key)) => {
-                    let h3 = larva_php::http3::Http3Server::new(h3_addr.clone(), cert, key, server_arc);
+                    let h3 = larva_php::http3::Http3Server::new(
+                        h3_addr.clone(),
+                        cert,
+                        key,
+                        server_arc,
+                    );
                     // Advertise HTTP/3 on TCP responses via Alt-Svc.
                     larva_php::server::set_http3_port(addr.port());
                     std::thread::spawn(move || {
@@ -368,6 +492,14 @@ fn main() -> ExitCode {
                     return ExitCode::from(1);
                 }
             }
+        }
+
+        #[cfg(not(feature = "http3"))]
+        if args.lets_encrypt {
+            eprintln!(
+                "--lets-encrypt requires building with --features http3,acme"
+            );
+            return ExitCode::from(1);
         }
 
         // Start HTTP server
@@ -388,6 +520,50 @@ fn main() -> ExitCode {
         print_usage(&mut std::io::stderr());
         ExitCode::from(1)
     }
+}
+
+/// Obtain a Let's Encrypt certificate via ACME v2 (HTTP-01 challenge).
+///
+/// Returns the [`CertResult`] with paths to the certificate, private key, and
+/// full chain. On the first run this performs the full ACME flow (account
+/// registration, order, challenge validation, finalize, download). On
+/// subsequent runs it reuses the existing certificate if it is not near expiry.
+#[cfg(feature = "acme")]
+async fn obtain_lets_encrypt_certs(
+    email: &str,
+    domains: &[String],
+    cert_dir: &std::path::Path,
+    challenge_dir: &std::path::Path,
+    staging: bool,
+    renew_days: u32,
+) -> larva_php::errors::Result<larva_php::acme::CertResult> {
+    use std::path::PathBuf;
+
+    let config = larva_php::acme::AcmeConfig {
+        email: email.to_string(),
+        domains: domains.to_vec(),
+        cert_dir: cert_dir.to_path_buf(),
+        challenge_dir: challenge_dir.to_path_buf(),
+        staging,
+        renew_days,
+    };
+
+    let client = larva_php::acme::AcmeClient::new(config)?;
+    client.obtain_certificate().await
+}
+
+#[cfg(not(feature = "acme"))]
+async fn obtain_lets_encrypt_certs(
+    _email: &str,
+    _domains: &[String],
+    _cert_dir: &std::path::Path,
+    _challenge_dir: &std::path::Path,
+    _staging: bool,
+    _renew_days: u32,
+) -> larva_php::errors::Result<larva_php::acme::CertResult> {
+    Err(crate::errors::Error::Acme(
+        "acme feature not enabled".to_string(),
+    ))
 }
 
 /// Self-test of the 2-layer runtime: spawn workers and dispatch a request.

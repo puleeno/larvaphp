@@ -34,6 +34,8 @@ tokio-util = { version = "0.7", optional = true }
 notify = { version = "6", optional = true, features = ["default"] }
 quiche = { version = "0.30", optional = true }
 rcgen = { version = "0.13", optional = true }
+reqwest = { version = "0.13", optional = true, features = ["json"] }
+base64 = { version = "0.22", optional = true }
 memmap2 = { workspace = true }
 num_cpus = { workspace = true }
 
@@ -45,6 +47,7 @@ hotreload = ["mercure", "watcher"]
 http3 = ["quiche", "rcgen"]
 fcgi = []
 embedded = []
+acme = ["reqwest", "base64"]
 
 [[bin]]
 name = "larva-php"
