@@ -5,8 +5,10 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::{Arc, RwLock};
+use std::task::{Context, Poll};
 use std::time::{SystemTime, UNIX_EPOCH, Instant};
 use bytes::Bytes;
 use http_body_util::BodyExt;
@@ -16,7 +18,8 @@ use hyper::{Request, Response, StatusCode};
 use hyper::body::Incoming as IncomingBody;
 use hyper_util::server::conn::auto;
 use hyper_util::rt::TokioIo;
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpStream};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use dashmap::DashMap;
 
 use crate::context::{PhpContext, RequestOption};
@@ -27,6 +30,63 @@ use tracing::{error, info, Level};
 
 /// HTTP/3 UDP port (0 = HTTP/3 disabled). Set once at startup.
 static H3_PORT: AtomicU16 = AtomicU16::new(0);
+
+/// A connection accepted by the TCP listener, optionally wrapped in TLS.
+/// This lets the request handler stay identical for plain HTTP and HTTPS.
+enum ConnectionStream {
+    Plain(TcpStream),
+    #[cfg(feature = "tls")]
+    Tls(tokio_rustls::server::TlsStream<TcpStream>),
+}
+
+impl AsyncRead for ConnectionStream {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            ConnectionStream::Plain(stream) => Pin::new(stream).poll_read(cx, buf),
+            #[cfg(feature = "tls")]
+            ConnectionStream::Tls(stream) => Pin::new(stream).poll_read(cx, buf),
+        }
+    }
+}
+
+impl AsyncWrite for ConnectionStream {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        match self.get_mut() {
+            ConnectionStream::Plain(stream) => Pin::new(stream).poll_write(cx, buf),
+            #[cfg(feature = "tls")]
+            ConnectionStream::Tls(stream) => Pin::new(stream).poll_write(cx, buf),
+        }
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            ConnectionStream::Plain(stream) => Pin::new(stream).poll_flush(cx),
+            #[cfg(feature = "tls")]
+            ConnectionStream::Tls(stream) => Pin::new(stream).poll_flush(cx),
+        }
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            ConnectionStream::Plain(stream) => Pin::new(stream).poll_shutdown(cx),
+            #[cfg(feature = "tls")]
+            ConnectionStream::Tls(stream) => Pin::new(stream).poll_shutdown(cx),
+        }
+    }
+}
+
+#[cfg(feature = "tls")]
+type TlsAcceptor = tokio_rustls::TlsAcceptor;
+#[cfg(not(feature = "tls"))]
+type TlsAcceptor = ();
 
 /// Set the HTTP/3 UDP port so TCP responses can advertise it via `Alt-Svc`.
 pub fn set_http3_port(port: u16) {
@@ -168,6 +228,71 @@ impl RateLimiter {
         entry.count += 1;
         true
     }
+}
+
+/// Return true when the request path is a Let's Encrypt HTTP-01 challenge.
+///
+/// ACME validation must not be redirected to a canonical host: the challenge
+/// token is requested on the exact hostname being authorized.
+pub(crate) fn is_acme_challenge_path(path_and_query: &str) -> bool {
+    path_and_query
+        .split('?')
+        .next()
+        .unwrap_or("")
+        .starts_with("/.well-known/acme-challenge/")
+}
+
+/// Build a canonical redirect target for `www.` hosts.
+///
+/// WordPress generates absolute form actions from its configured home URL. If
+/// the browser visits `www.example.com`, the login test cookie is scoped to
+/// `www`, but the form posts to `example.com`, so PHP never receives the test
+/// cookie and reports "Cookies are blocked". Redirecting `www` to the bare host
+/// at the server level keeps the browser on a single origin.
+pub(crate) fn canonical_redirect_location(
+    scheme: &str,
+    authority: &str,
+    path_and_query: &str,
+) -> Option<String> {
+    let (host, port) = match authority.rsplit_once(':') {
+        Some((h, p)) if !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()) => (h, Some(p)),
+        _ => (authority, None),
+    };
+    if host.len() < 4 || !host[..4].eq_ignore_ascii_case("www.") {
+        return None;
+    }
+    let bare_host = &host[4..];
+    if bare_host.is_empty() {
+        return None;
+    }
+    let canonical_authority = match port {
+        Some(p) => format!("{}:{}", bare_host, p),
+        None => bare_host.to_string(),
+    };
+    let path = if path_and_query.is_empty() {
+        "/"
+    } else {
+        path_and_query
+    };
+    Some(format!("{}://{}{}", scheme, canonical_authority, path))
+}
+
+/// Join repeated `Cookie` header fields into the single CGI `HTTP_COOKIE`
+/// value. HTTP/2 clients may split cookies across several fields, while a CGI
+/// environment only has one slot; keeping just the last field silently drops
+/// WordPress' auth cookies and breaks login.
+fn combine_cookie_header_values<'a, I>(values: I) -> Option<String>
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    let mut iter = values.into_iter();
+    let first = iter.next()?;
+    let mut combined = String::from(first);
+    for value in iter {
+        combined.push_str("; ");
+        combined.push_str(value);
+    }
+    Some(combined)
 }
 
 impl Server {
@@ -664,53 +789,13 @@ impl Server {
     /// Serve a static file directly with nginx-style optimizations:
     /// file metadata cache, ETag, Last-Modified headers.
     async fn serve_static_file(&self, path: &str) -> Result<Response<Full<Bytes>>> {
-        // Block sensitive files from being served
-        if is_sensitive_file(path) {
-            return Err(Error::Ffi("Forbidden".to_string()));
-        }
-
-        // Check file cache first
-        let cached = self.file_cache.get(path);
-
-        let metadata = if let Some(c) = cached {
-            c.clone()
-        } else {
-            let meta = tokio::fs::metadata(path).await.map_err(|e| Error::Io(e))?;
-            let size = meta.len();
-            let mtime = meta
-                .modified()
-                .map_err(|e| Error::Io(e))?
-                .duration_since(UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
-            let etag = format!("\"{:x}-{:x}\"", mtime, size);
-
-            // Insert into cache
-            self.file_cache.insert(path.to_string(), CachedFile { size, mtime, etag: etag.clone() });
-
-            CachedFile { size, mtime, etag }
-        };
-
-        let mime = Self::mime_type(path);
-        let content = tokio::fs::read(path)
-            .await
-            .map_err(|e| Error::Io(e))?;
-
-        Ok(Response::builder()
-            .status(StatusCode::OK)
-            .header("content-type", mime)
-            .header("content-length", metadata.size.to_string())
-            .header("last-modified", http_date(metadata.mtime))
-            .header("etag", &metadata.etag)
-            .header("accept-ranges", "bytes")
-            .header("x-content-type-options", "nosniff")
-            .header("x-frame-options", "DENY")
-            .header("server", "LarvaPHP")
-            .body(Full::new(Bytes::from(content)))
-            .unwrap())
+        // Share the nginx-style implementation with the main request loop.
+        serve_static_file_nginx(path, "GET", &hyper::HeaderMap::new())
     }
 
-    /// Determine MIME type from file extension.
+    /// Determine MIME type from file extension (kept for the unit tests;
+    /// request handling uses the shared `mime_type_static` helper).
+    #[cfg(test)]
     fn mime_type(path: &str) -> String {
         match std::path::Path::new(path)
             .extension()
@@ -739,14 +824,36 @@ impl Server {
         .to_string()
     }
 
-    /// Start the HTTP server listening on the given address.
+    /// Start the plain HTTP server listening on the given address.
     pub async fn start_server(&self, addr: SocketAddr) -> Result<()> {
+        self.start_server_inner(addr, None).await
+    }
+
+    /// Start an HTTPS server directly on the given address (no proxy).
+    #[cfg(feature = "tls")]
+    pub async fn start_server_tls(
+        &self,
+        addr: SocketAddr,
+        cert_path: &str,
+        key_path: &str,
+    ) -> Result<()> {
+        let config = crate::tls::build_server_config(cert_path, key_path)?;
+        let acceptor = Arc::new(TlsAcceptor::from(Arc::new(config)));
+        self.start_server_inner(addr, Some(acceptor)).await
+    }
+
+    async fn start_server_inner(
+        &self,
+        addr: SocketAddr,
+        tls_acceptor: Option<Arc<TlsAcceptor>>,
+    ) -> Result<()> {
         self.activate();
 
         let listener = TcpListener::bind(addr)
             .await
             .map_err(|e| Error::Io(e))?;
-        info!("LarvaPHP server listening on http://{}", addr);
+        let scheme = if tls_acceptor.is_some() { "https" } else { "http" };
+        info!("LarvaPHP server listening on {}://{}", scheme, addr);
 
         // Dual-stack: also listen on the IPv6 equivalent of an IPv4 bind so
         // `localhost` works. On Windows `localhost` resolves to `::1` first,
@@ -755,7 +862,7 @@ impl Server {
         let v6_listener = match ipv6_equivalent(addr) {
             Some(addr6) => match TcpListener::bind(addr6).await {
                 Ok(l) => {
-                    info!("LarvaPHP server also listening on http://{}", addr6);
+                    info!("LarvaPHP server also listening on {}://{}", scheme, addr6);
                     Some(l)
                 }
                 Err(e) => {
@@ -767,6 +874,7 @@ impl Server {
         };
         let server_root = self.root.clone();
         let server_split_path = self.split_path.clone();
+        let is_tls = tls_acceptor.is_some();
         // Snapshot worker matchers and php.ini once (Flyweight: shared via Arc).
         let server_workers: Arc<Vec<Arc<Worker>>> =
             Arc::new(self.workers_with_request_matcher.read().unwrap().clone());
@@ -789,6 +897,21 @@ impl Server {
             };
             let (stream, _) = accepted.map_err(|e| Error::Io(e))?;
             let peer_addr = stream.peer_addr().map_err(|e| Error::Io(e))?;
+
+            #[cfg(feature = "tls")]
+            let stream = if let Some(acceptor) = &tls_acceptor {
+                match acceptor.accept(stream).await {
+                    Ok(stream) => ConnectionStream::Tls(stream),
+                    Err(e) => {
+                        tracing::debug!("TLS handshake failed from {}: {}", peer_addr, e);
+                        continue;
+                    }
+                }
+            } else {
+                ConnectionStream::Plain(stream)
+            };
+            #[cfg(not(feature = "tls"))]
+            let stream = ConnectionStream::Plain(stream);
 
             let root = server_root.clone();
             let split_path = server_split_path.clone();
@@ -822,7 +945,42 @@ impl Server {
                                     );
                                 }
 
-                                let uri = req.uri().to_string();
+                                // HTTP/2 requests carry scheme + authority in
+                                // `Uri`, so `to_string()` yields an absolute
+                                // URI. Path resolution must only see the
+                                // origin-form path + query, like HTTP/1.1.
+                                let uri = req
+                                    .uri()
+                                    .path_and_query()
+                                    .map(|pq| pq.as_str())
+                                    .unwrap_or_else(|| req.uri().path())
+                                    .to_string();
+
+                                // Keep every browser on one origin. WordPress'
+                                // absolute form actions point at the bare host,
+                                // while a cookie set on `www` is not sent there.
+                                if !is_acme_challenge_path(&uri) {
+                                    let authority = req
+                                        .headers()
+                                        .get("host")
+                                        .and_then(|v| v.to_str().ok())
+                                        .or_else(|| {
+                                            req.uri().authority().map(|a| a.as_str())
+                                        });
+                                    if let Some(location) = authority.and_then(|a| {
+                                        canonical_redirect_location(scheme, a, &uri)
+                                    }) {
+                                        return Ok::<Response<Full<Bytes>>, hyper::Error>(
+                                            Response::builder()
+                                                .status(StatusCode::MOVED_PERMANENTLY)
+                                                .header("location", location)
+                                                .header("cache-control", "no-store")
+                                                .header("server", "LarvaPHP")
+                                                .body(Full::new(Bytes::new()))
+                                                .unwrap(),
+                                        );
+                                    }
+                                }
 
                                 // Worker request matching (Strategy: first matcher wins).
                                 // If a worker matches, route to its script (front controller).
@@ -947,50 +1105,20 @@ impl Server {
             );
         };
 
-        // Serve static files directly (not .php)
-                                if let Some(ext) = std::path::Path::new(&path).extension() {
-                                    if ext.to_string_lossy() != "php" {
-                                        // Block sensitive files
-                                        if is_sensitive_file(&path) {
-                                            return Ok::<Response<Full<Bytes>>, hyper::Error>(
-                                                Response::builder()
-                                                    .status(StatusCode::FORBIDDEN)
-                                                    .header("content-type", "text/plain; charset=UTF-8")
-                                                    .header("server", "LarvaPHP")
-                                                    .body(Full::new(Bytes::from("Forbidden")))
-                                                    .unwrap(),
-                                            );
-                                        }
-
-                                        let content = tokio::fs::read(&path)
-                                            .await
-                                            .unwrap_or_default();
-                                        let mime = mime_type_static(&path);
-                                        // Nginx-style headers for static files
-                                        let mut builder = Response::builder()
-                                            .status(StatusCode::OK)
-                                            .header("content-type", mime)
-                                            .header("content-length", content.len().to_string())
-                                            .header("accept-ranges", "bytes")
-                                            .header("x-content-type-options", "nosniff")
-                                            .header("x-frame-options", "DENY")
-                                            .header("server", "LarvaPHP");
-                                        if let Ok(meta) = tokio::fs::metadata(&path).await {
-                                            if let Ok(mt) = meta.modified() {
-                                                if let Ok(since) = mt.duration_since(UNIX_EPOCH) {
-                                                    builder = builder
-                                                        .header("last-modified", http_date(since.as_secs()))
-                                                        .header("etag", format!("\"{:x}-{:x}\"", since.as_secs(), meta.len()));
-                                                }
-                                            }
-                                        }
-                                        return Ok::<Response<Full<Bytes>>, hyper::Error>(
-                                            builder
-                                                .body(Full::new(Bytes::from(content)))
-                                                .unwrap(),
-                                        );
-                                    }
-                                }
+        // Serve static files directly (not .php), nginx-style validators,
+        // conditional requests, HEAD, ranges and gzip_static variants.
+        if let Some(ext) = std::path::Path::new(&path).extension() {
+            if !ext.to_string_lossy().eq_ignore_ascii_case("php") {
+                return match serve_static_file_nginx(&path, req.method().as_str(), req.headers()) {
+                    Ok(response) => Ok(response),
+                    Err(_) => Ok(Response::builder()
+                        .status(StatusCode::INTERNAL_SERVER_ERROR)
+                        .header("server", "LarvaPHP")
+                        .body(Full::new(Bytes::from_static(b"Internal Server Error")))
+                        .unwrap()),
+                };
+            }
+        }
 
                                 // Rate limiting: only PHP requests count (static files
                                 // are served above and don't consume the quota). This
@@ -1021,6 +1149,20 @@ impl Server {
                                     format!("/{}", rel.replace('\\', "/"))
                                 };
 
+                                // HTTP/2 clients (notably Chrome) may split the
+                                // Cookie header into several fields. A CGI
+                                // environment has a single HTTP_COOKIE value,
+                                // so join them with "; " instead of letting
+                                // PreparedEnv (a HashMap) keep only the last
+                                // field. Losing cookies makes WordPress reject
+                                // the login with reauth=1.
+                                let combined_cookie = combine_cookie_header_values(
+                                    req.headers()
+                                        .get_all("cookie")
+                                        .iter()
+                                        .filter_map(|v| v.to_str().ok()),
+                                );
+
                                 let ctx = PhpContext {
                                     ctx: tokio::sync::watch::channel(None).1,
                                     document_root: root.clone(),
@@ -1028,10 +1170,16 @@ impl Server {
                                     env: {
                                         let mut e = PreparedEnv::new();
                                         for (k, v) in req.headers() {
+                                            if k.as_str().eq_ignore_ascii_case("cookie") {
+                                                continue;
+                                            }
                                             e.insert(
                                                 k.as_str().to_string().into_bytes(),
                                                 v.to_str().unwrap_or_default().to_string().into_bytes(),
                                             );
+                                        }
+                                        if let Some(ref cookie) = combined_cookie {
+                                            e.insert(b"cookie".to_vec(), cookie.as_bytes().to_vec());
                                         }
                                         e
                                     },
@@ -1062,19 +1210,48 @@ impl Server {
                                         .unwrap_or_default()
                                         .to_string(),
                                     server_protocol: "HTTP/1.1".to_string(),
-                                    server_name: req
-                                        .headers()
-                                        .get("host")
-                                        .and_then(|v| v.to_str().ok())
-                                        .and_then(|v| v.split_once(':').map(|(h, _)| h.to_string()))
-                                        .unwrap_or_else(|| "localhost".to_string()),
-                                    server_port: req
-                                        .headers()
-                                        .get("host")
-                                        .and_then(|v| v.to_str().ok())
-                                        .and_then(|v| v.split_once(':').map(|(_, p)| p.to_string()))
-                                        .unwrap_or_else(|| "80".to_string()),
-                                    https: "off".to_string(),
+                                    server_name: {
+                                        // HTTP/2 puts the authority in the URI
+                                        // and may not expose a `host` header.
+                                        let host = req
+                                            .headers()
+                                            .get("host")
+                                            .and_then(|v| v.to_str().ok())
+                                            .or_else(|| req.uri().authority().map(|a| a.as_str()))
+                                            .unwrap_or("localhost");
+                                        match host.rsplit_once(':') {
+                                            Some((h, p))
+                                                if !p.is_empty()
+                                                    && p.bytes().all(|b| b.is_ascii_digit()) =>
+                                            {
+                                                h.to_string()
+                                            }
+                                            _ => host.to_string(),
+                                        }
+                                    },
+                                    server_port: {
+                                        let host = req
+                                            .headers()
+                                            .get("host")
+                                            .and_then(|v| v.to_str().ok())
+                                            .or_else(|| req.uri().authority().map(|a| a.as_str()))
+                                            .unwrap_or("localhost");
+                                        match host.rsplit_once(':') {
+                                            Some((_, p))
+                                                if !p.is_empty()
+                                                    && p.bytes().all(|b| b.is_ascii_digit()) =>
+                                            {
+                                                p.to_string()
+                                            }
+                                            _ if is_tls => "443".to_string(),
+                                            _ => "80".to_string(),
+                                        }
+                                    },
+                                    https: if is_tls {
+                                        "on".to_string()
+                                    } else {
+                                        "off".to_string()
+                                    },
                                     headers_written: false,
                                     is_done: AtomicBool::new(false),
                                     client_had_closed: AtomicBool::new(false),
@@ -1460,6 +1637,9 @@ params.push(("HTTP_HOST".into(), http_host.clone()));
                 all_headers.push(("CONTENT_TYPE".to_string(), ctx.content_type.clone()));
             }
             all_headers.push(("HTTP_HOST".to_string(), http_host.clone()));
+            // WordPress' is_ssl() checks $_SERVER['HTTPS']; without this,
+            // wp-admin redirects to https://localhost/wp-admin/ under HTTP/2.
+            all_headers.push(("HTTPS".to_string(), ctx.https.clone()));
             if let Some(cookie) = ctx
                 .env
                 .iter()
@@ -1801,32 +1981,296 @@ fn resolve_index_php_static(uri: &str, root: &str) -> Option<String> {
 }
 
 /// Determine MIME type from file extension (static version for inline handler).
+/// Mirrors nginx's `conf/mime.types` for the types WordPress actually uses.
 fn mime_type_static(path: &str) -> String {
-    match std::path::Path::new(path)
+    let ext = std::path::Path::new(path)
         .extension()
         .and_then(|e| e.to_str())
         .unwrap_or("")
-    {
+        .to_ascii_lowercase();
+    let mime = match ext.as_str() {
+        "html" | "htm" | "shtml" => "text/html; charset=UTF-8",
         "css" => "text/css; charset=UTF-8",
-        "js" => "application/javascript; charset=UTF-8",
-        "json" => "application/json; charset=UTF-8",
-        "html" | "htm" => "text/html; charset=UTF-8",
+        "js" | "mjs" => "application/javascript; charset=UTF-8",
+        "json" | "map" => "application/json; charset=UTF-8",
+        "xml" | "xsl" => "application/xml; charset=UTF-8",
+        "txt" | "md" => "text/plain; charset=UTF-8",
+        "svg" | "svgz" => "image/svg+xml",
         "png" => "image/png",
         "jpg" | "jpeg" => "image/jpeg",
         "gif" => "image/gif",
-        "svg" => "image/svg+xml",
+        "webp" => "image/webp",
+        "avif" => "image/avif",
+        "bmp" => "image/bmp",
         "ico" => "image/x-icon",
         "woff" => "font/woff",
         "woff2" => "font/woff2",
         "ttf" => "font/ttf",
+        "otf" => "font/otf",
         "eot" => "application/vnd.ms-fontobject",
         "pdf" => "application/pdf",
         "zip" => "application/zip",
-        "xml" => "application/xml; charset=UTF-8",
-        "txt" => "text/plain; charset=UTF-8",
+        "wasm" => "application/wasm",
+        "mp4" => "video/mp4",
+        "webm" => "video/webm",
+        "mp3" => "audio/mpeg",
+        "wav" => "audio/wav",
+        "ogg" => "audio/ogg",
         _ => "application/octet-stream",
+    };
+    mime.to_string()
+}
+
+/// True for types nginx would consider safe to serve from a precompressed
+/// `.gz` variant. Never look for `.gz` next to already-compressed binaries.
+fn is_compressible_static(path: &str) -> bool {
+    let ext = std::path::Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    matches!(
+        ext.as_str(),
+        "html" | "htm" | "css" | "js" | "mjs" | "json" | "xml" | "svg" | "txt"
+    )
+}
+
+fn header_value<'a>(headers: &'a hyper::HeaderMap, name: &str) -> Option<&'a str> {
+    headers.get(name).and_then(|v| v.to_str().ok())
+}
+
+/// Parse nginx's IMF-fixdate (`Sun, 06 Nov 1994 08:49:37 GMT`) well enough
+/// for If-Modified-Since / If-Unmodified-Since comparisons (second precision).
+fn parse_http_date(value: &str) -> Option<u64> {
+    let value = value.trim();
+    let mut parts = value.split(' ');
+    let _weekday = parts.next()?;
+    let day: u64 = parts.next()?.trim_end_matches(',').parse().ok()?;
+    let month = match parts.next()? {
+        "Jan" => 1u32, "Feb" => 2, "Mar" => 3, "Apr" => 4, "May" => 5, "Jun" => 6,
+        "Jul" => 7, "Aug" => 8, "Sep" => 9, "Oct" => 10, "Nov" => 11, "Dec" => 12,
+        _ => return None,
+    };
+    let year: i64 = parts.next()?.parse().ok()?;
+    let time = parts.next()?;
+    if parts.next() != Some("GMT") {
+        return None;
     }
-    .to_string()
+    let mut t = time.split(':');
+    let hh: u64 = t.next()?.parse().ok()?;
+    let mm: u64 = t.next()?.parse().ok()?;
+    let ss: u64 = t.next()?.parse().ok()?;
+    if t.next().is_some() || hh > 23 || mm > 59 || ss > 59 {
+        return None;
+    }
+
+    // Days from 1970-01-01 to the first day of the given month in `year`.
+    let y = year - if month <= 2 { 1 } else { 0 };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let mp = month as i64 + if month > 2 { -3 } else { 9 };
+    let doy = (153 * mp + 2) / 5 + day as i64 - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146097 + doe - 719468; // days since 1970-01-01
+    let secs = days.checked_mul(86_400)?
+        + hh as i64 * 3_600
+        + mm as i64 * 60
+        + ss as i64;
+    u64::try_from(secs).ok()
+}
+
+fn etag_matches(list: &str, etag: &str) -> bool {
+    list.split(',')
+        .any(|item| {
+            let item = item.trim();
+            item == "*"
+                || item == etag
+                || item.strip_prefix("W/") == Some(etag)
+                || item == etag.strip_prefix("W/").unwrap_or(etag)
+        })
+}
+
+fn if_range_matches(value: &str, etag: &str, mtime: u64) -> bool {
+    let value = value.trim();
+    if value.starts_with('"') || value.starts_with("W/") {
+        etag_matches(value, etag)
+    } else {
+        parse_http_date(value).is_some_and(|d| d == mtime)
+    }
+}
+
+/// nginx-style static delivery: validators, conditional requests, HEAD,
+/// byte ranges and precompressed `.gz` variants. Only safe methods are served;
+/// POST/PUT/PATCH/DELETE get 405 (they belong to PHP, never to the file cache).
+fn serve_static_file_nginx(
+    path: &str,
+    method: &str,
+    headers: &hyper::HeaderMap,
+) -> Result<Response<Full<Bytes>>> {
+    if !matches!(method, "GET" | "HEAD") {
+        return Ok(Response::builder()
+            .status(StatusCode::METHOD_NOT_ALLOWED)
+            .header("allow", "GET, HEAD")
+            .header("server", "LarvaPHP")
+            .body(Full::new(Bytes::from_static(b"Method Not Allowed")))
+            .unwrap());
+    }
+    if is_sensitive_file(path) {
+        return Ok(Response::builder()
+            .status(StatusCode::FORBIDDEN)
+            .header("content-type", "text/plain; charset=UTF-8")
+            .header("server", "LarvaPHP")
+            .body(Full::new(Bytes::from_static(b"Forbidden")))
+            .unwrap());
+    }
+
+    // gzip_static: prefer a precompressed variant when the client accepts it.
+    let mut served_gz = false;
+    let mut disk_path = path.to_string();
+    if is_compressible_static(path)
+        && header_value(headers, "accept-encoding")
+            .is_some_and(|v| v.to_ascii_lowercase().contains("gzip"))
+    {
+        let gz = format!("{}.gz", path);
+        if std::path::Path::new(&gz).is_file() {
+            disk_path = gz;
+            served_gz = true;
+        }
+    }
+
+    let meta = std::fs::metadata(&disk_path).map_err(Error::Io)?;
+    if !meta.is_file() {
+        return Ok(Response::builder()
+            .status(StatusCode::NOT_FOUND)
+            .header("server", "LarvaPHP")
+            .body(Full::new(Bytes::from_static(b"Not Found")))
+            .unwrap());
+    }
+    let total = meta.len();
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let etag = format!("\"{:x}-{:x}\"", mtime, total);
+
+    // Validators are checked before we ever read the body (nginx filters do
+    // the same), so 304/412 responses stay cheap.
+    if let Some(v) = header_value(headers, "if-match") {
+        if !etag_matches(v, &etag) {
+            return Ok(Response::builder()
+                .status(StatusCode::PRECONDITION_FAILED)
+                .header("server", "LarvaPHP")
+                .body(Full::new(Bytes::from_static(b"Precondition Failed")))
+                .unwrap());
+        }
+    }
+    if let Some(v) = header_value(headers, "if-unmodified-since") {
+        if parse_http_date(v).is_some_and(|d| mtime > d) {
+            return Ok(Response::builder()
+                .status(StatusCode::PRECONDITION_FAILED)
+                .header("server", "LarvaPHP")
+                .body(Full::new(Bytes::from_static(b"Precondition Failed")))
+                .unwrap());
+        }
+    }
+
+    let mut not_modified = false;
+    if let Some(v) = header_value(headers, "if-none-match") {
+        not_modified = etag_matches(v, &etag);
+    } else if let Some(v) = header_value(headers, "if-modified-since") {
+        not_modified = parse_http_date(v).is_some_and(|d| mtime <= d);
+    }
+    if not_modified {
+        return Ok(Response::builder()
+            .status(StatusCode::NOT_MODIFIED)
+            .header("etag", &etag)
+            .header("last-modified", http_date(mtime))
+            .header("server", "LarvaPHP")
+            .body(Full::new(Bytes::new()))
+            .unwrap());
+    }
+
+    // Byte ranges, but only when If-Range still matches this representation.
+    let mut range_header = header_value(headers, "range").map(str::to_string);
+    let if_range_ok = header_value(headers, "if-range")
+        .map(|v| if_range_matches(v, &etag, mtime))
+        .unwrap_or(true);
+    let range = if if_range_ok {
+        range_header
+            .as_deref()
+            .and_then(|v| v.strip_prefix("bytes="))
+            .and_then(|spec| {
+                let (start, end) = spec.split_once('-')?;
+                let start: u64 = if start.is_empty() { 0 } else { start.trim().parse().ok()? };
+                let end: u64 = match end.trim() {
+                    "" => total.saturating_sub(1),
+                    e => e.parse().ok()?,
+                };
+                if start > end || start >= total {
+                    return None;
+                }
+                Some((start, end.min(total - 1)))
+            })
+    } else {
+        range_header = None;
+        None
+    };
+
+    let (status, offset, length) = match range {
+        Some((start, end)) => (StatusCode::PARTIAL_CONTENT, start, end - start + 1),
+        None => {
+            if range_header.is_some() {
+                // Unsatisfiable Range: nginx returns 416 with Content-Range: */size.
+                return Ok(Response::builder()
+                    .status(StatusCode::RANGE_NOT_SATISFIABLE)
+                    .header("content-range", format!("bytes */{}", total))
+                    .header("accept-ranges", "bytes")
+                    .header("server", "LarvaPHP")
+                    .body(Full::new(Bytes::new()))
+                    .unwrap());
+            }
+            (StatusCode::OK, 0, total)
+        }
+    };
+
+    let mut builder = Response::builder()
+        .status(status)
+        .header("content-type", mime_type_static(path))
+        .header("content-length", length.to_string())
+        .header("last-modified", http_date(mtime))
+        .header("etag", &etag)
+        .header("accept-ranges", "bytes")
+        .header("x-content-type-options", "nosniff")
+        .header("x-frame-options", "DENY")
+        .header("server", "LarvaPHP");
+    if served_gz {
+        builder = builder
+            .header("content-encoding", "gzip")
+            .header("vary", "Accept-Encoding");
+    }
+    if status == StatusCode::PARTIAL_CONTENT {
+        builder = builder.header(
+            "content-range",
+            format!("bytes {}-{}/{}", offset, offset + length - 1, total),
+        );
+    }
+
+    // HEAD: identical headers, zero body (nginx header_only).
+    if method == "HEAD" {
+        return Ok(builder.body(Full::new(Bytes::new())).unwrap());
+    }
+
+    let content = std::fs::read(&disk_path).map_err(Error::Io)?;
+    let start = offset as usize;
+    let end = (offset + length) as usize;
+    let body = if start == 0 && end == content.len() {
+        Bytes::from(content)
+    } else {
+        Bytes::copy_from_slice(&content[start..end])
+    };
+    Ok(builder.body(Full::new(body)).unwrap())
 }
 
 /// URL-decode a string.
@@ -2022,6 +2466,44 @@ fn is_sensitive_file(path: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn combine_cookie_header_values_joins_repeated_fields() {
+        assert_eq!(
+            combine_cookie_header_values(["a=1", "b=2", "c=3"]).as_deref(),
+            Some("a=1; b=2; c=3")
+        );
+        assert_eq!(
+            combine_cookie_header_values(["a=1"]).as_deref(),
+            Some("a=1")
+        );
+        assert_eq!(combine_cookie_header_values(std::iter::empty::<&str>()), None);
+    }
+
+    #[test]
+    fn canonical_redirect_strips_www_and_keeps_port_and_query() {
+        assert_eq!(
+            canonical_redirect_location(
+                "https",
+                "www.nghesachxua.vn",
+                "/wp-login.php?reauth=1"
+            ),
+            Some("https://nghesachxua.vn/wp-login.php?reauth=1".to_string())
+        );
+        assert_eq!(
+            canonical_redirect_location("https", "WWW.example.com:8443", "/wp-admin/"),
+            Some("https://example.com:8443/wp-admin/".to_string())
+        );
+        assert_eq!(canonical_redirect_location("https", "example.com", "/"), None);
+        assert_eq!(canonical_redirect_location("https", "www.", "/"), None);
+    }
+
+    #[test]
+    fn acme_challenge_paths_are_not_redirected() {
+        assert!(is_acme_challenge_path("/.well-known/acme-challenge/token"));
+        assert!(is_acme_challenge_path("/.well-known/acme-challenge/token?x=1"));
+        assert!(!is_acme_challenge_path("/wp-login.php"));
+    }
 
     // === RateLimiter tests ===
 

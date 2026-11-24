@@ -42,6 +42,8 @@ pub mod runtime;
 pub mod scaling;
 pub mod server;
 pub mod thread;
+#[cfg(feature = "tls")]
+pub mod tls;
 pub mod types;
 pub mod worker;
 

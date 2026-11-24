@@ -15,6 +15,7 @@ larva-php/
 │   ├── api.md                      # Public API documentation
 │   ├── hot-reload.md               # Hot reload guide
 │   ├── middleware.md               # Middleware & rewrite rules
+│   ├── troubleshooting.md          # Known issues & diagnosis (HTTP/2 cookies, login loops)
 │   └── examples.md                 # Usage examples
 └── crates/
     ├── larva-php/                  # Main crate
@@ -251,6 +252,12 @@ All tests run without requiring a PHP installation (pure Rust unit tests).
 ## Architecture
 
 See [`docs/architecture.md`](docs/architecture.md) for detailed architecture.
+
+## Troubleshooting
+
+See [`docs/troubleshooting.md`](docs/troubleshooting.md) for known issues and
+diagnosis steps, including the HTTP/2 duplicate `Cookie` header bug that caused
+WordPress login loops with `reauth=1`.
 
 ## License
 

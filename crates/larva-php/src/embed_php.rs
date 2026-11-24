@@ -155,7 +155,7 @@ pub mod imp {
         let mut server_keys: Vec<CString> = Vec::new();
         let mut server_vals: Vec<CString> = Vec::new();
         for (k, v) in &req.headers {
-            let key = if k.starts_with("HTTP_") {
+            let key = if k.starts_with("HTTP_") || k.eq_ignore_ascii_case("HTTPS") {
                 k.clone()
             } else if k.eq_ignore_ascii_case("Content-Type")
                 || k.eq_ignore_ascii_case("Content-Length")

@@ -158,6 +158,16 @@ static void larva_register_server_variables(zval *track_vars_array) {
     ADD_STR("REQUEST_METHOD", ri->request_method);
     ADD_STR("QUERY_STRING", ri->query_string);
     ADD_STR("CONTENT_TYPE", ri->content_type);
+    {
+        char content_length[32];
+        int n = snprintf(content_length, sizeof(content_length), "%ld",
+                         (long)ri->content_length);
+        if (n > 0) {
+            add_assoc_stringl_ex(track_vars_array, "CONTENT_LENGTH",
+                                 strlen("CONTENT_LENGTH"), content_length,
+                                 (size_t)n);
+        }
+    }
     ADD_STR("PATH_TRANSLATED", ri->path_translated);
     ADD_STR("REQUEST_URI", ri->request_uri);
     ADD_STR("SCRIPT_FILENAME", ri->path_translated);
@@ -200,9 +210,23 @@ static void free_cookie(void) {
 static int execute_script_internal(const char *script_path) {
     reset_buffers();
 
+    /* PHP only parses POST bodies and cookies when a server context exists.
+     * The Windows bridge already does this; the Unix bridge missed it, which
+     * left $_POST empty even though php://input had the body. */
+    static int dummy_server_context;
+    SG(server_context) = &dummy_server_context;
+
     if (php_request_startup() != SUCCESS) {
         return -1;
     }
+
+    /* The embedded SAPI is persistent: php_request_shutdown() does not always
+     * clear SG(sapi_headers).http_response_code. A redirect from an earlier
+     * request (e.g. /wp-admin/ -> 302) therefore leaked into every following
+     * response, including load-scripts.php bundles, which browsers refused to
+     * execute as JavaScript. Reset it after sapi_activate() so the script can
+     * still set its own status afterwards. */
+    SG(sapi_headers).http_response_code = 200;
 
     zend_file_handle fh;
     memset(&fh, 0, sizeof(fh));
