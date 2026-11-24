@@ -5,6 +5,11 @@ spawning a `php-cgi.exe` process per request. This eliminates the ~80 ms
 process-spawn overhead and gives **3–4× faster** response times for
 lightweight scripts and **15–30 %** for database-heavy apps like WordPress.
 
+> On Linux/macOS the release build uses a separate real SAPI shim
+> (`larva_embed_unix.c`) linked against the system PHP embed library; there are
+> no no-op stubs. See [`build-release-linux.md`](build-release-linux.md) for
+> requirements and verification.
+
 ## Why a C Shim?
 
 Calling the PHP C API directly from Rust (`larva-php-sys`) crashed inside

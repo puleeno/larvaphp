@@ -34,7 +34,11 @@ tokio-util = { version = "0.7", optional = true }
 notify = { version = "6", optional = true, features = ["default"] }
 quiche = { version = "0.30", optional = true }
 rcgen = { version = "0.13", optional = true }
-reqwest = { version = "0.13", optional = true, features = ["json"] }
+# ACME only needs HTTPS. Use rustls with the `ring` provider: the default
+# aws-lc-rs provider needs extra UBSan runtime symbols on some Linux
+# toolchains, and native-tls conflicts with the BoringSSL used by HTTP/3.
+reqwest = { version = "0.13", optional = true, default-features = false, features = ["json", "rustls-no-provider", "http2", "system-proxy"] }
+rustls = { version = "0.23", optional = true, default-features = false, features = ["ring", "std", "tls12"] }
 base64 = { version = "0.22", optional = true }
 memmap2 = { workspace = true }
 num_cpus = { workspace = true }
@@ -47,7 +51,7 @@ hotreload = ["mercure", "watcher"]
 http3 = ["quiche", "rcgen"]
 fcgi = []
 embedded = []
-acme = ["reqwest", "base64"]
+acme = ["reqwest", "rustls", "base64"]
 
 [[bin]]
 name = "larva-php"

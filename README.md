@@ -91,8 +91,8 @@ conflicts or gets mixed together:
 | Strategy | Host OS | C bridge | Linking | Embedded PHP |
 |----------|---------|----------|---------|--------------|
 | `WindowsPlatform` | Windows | `stubs.c` + `larva_embed.c` | `php8.lib`, MSVC libs | supported (`php8.dll`) |
-| `LinuxPlatform` | Linux | `stubs.c` + `unix_stubs.c` | none extra | not supported (stubs return errors) |
-| `MacosPlatform` | macOS | `stubs.c` + `unix_stubs.c` | none extra | not supported (stubs return errors) |
+| `LinuxPlatform` | Linux | `stubs.c` + `larva_embed_unix.c` | `libphp.so`, system PHP libs | supported (real Zend SAPI) |
+| `MacosPlatform` | macOS | `stubs.c` + `larva_embed_unix.c` | PHP embed library | supported (real Zend SAPI) |
 
 Linux and macOS share the `UnixPlatform` implementation but are distinct
 named strategies, so they can diverge later without touching shared code.
@@ -100,11 +100,28 @@ The old MSVC-only `+crt-static` flag was removed from
 [`.cargo/config.toml`](.cargo/config.toml) for Linux/macOS (it broke host
 proc-macro artifacts).
 
+On Linux/macOS the real embed path needs PHP development headers and the PHP
+embed library. No no-op PHP stubs are compiled into this release.
+
+See [`docs/build-release-linux.md`](docs/build-release-linux.md) for the full
+requirements, environment variables, verification steps and troubleshooting.
+
 ```bash
-# Linux / macOS (release binary at target/release/larva-php)
-cargo build --release -p larva-php --bin larva-php
-cargo test --lib
+# Debian/Ubuntu (quick start)
+sudo apt install -y build-essential cmake clang libclang-dev \
+  php8.3-dev php8.3-cli libphp8.3-embed
+sudo ln -sf /usr/lib/libphp8.3.so /usr/lib/libphp.so
+
+export PHP_LIB_DIR=/usr/lib
+export PHP_EMBED_LIB=php8.3
+export PHP_INCLUDES="$(php-config --includes)"
+cargo build --release -p larva-php --bin larva-php \
+  --features embedded,http3,acme,mercure
+cargo test --lib --features embedded,http3,acme,mercure
 ```
+
+`PHP_LIB_DIR` is embedded in the binary's RUNPATH, so the resulting binary runs
+without setting `LD_LIBRARY_PATH`.
 
 ### Serve a PHP Application
 

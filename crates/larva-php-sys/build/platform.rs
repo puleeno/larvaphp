@@ -9,12 +9,13 @@
 //!
 //! * [`WindowsPlatform`] keeps the original behaviour: compile the Win32 PHP
 //!   shim and link against `php8.lib`.
-//! * [`UnixPlatform`] is shared by Linux and macOS. The embedded Zend runtime
-//!   is Windows-only, so it compiles the neutral FFI stubs instead and emits
-//!   no platform libraries. Each OS still gets its own named strategy so the
-//!   two builds can diverge later without code conflicts.
+//! * [`UnixPlatform`] is shared by Linux and macOS. It compiles the real PHP
+//!   SAPI shim against the PHP development headers and links the PHP embed
+//!   library. No no-op stubs are used in this path. Each OS still gets its own
+//!   named strategy so the two builds can diverge later without code conflicts.
 
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 /// A platform-specific build strategy.
 pub trait PlatformBuild {
@@ -22,9 +23,7 @@ pub trait PlatformBuild {
     fn name(&self) -> &'static str;
 
     /// C sources that implement the FFI bridge on this platform.
-    fn c_sources(&self, src: &Path) -> Vec<PathBuf> {
-        vec![src.join("stubs.c"), src.join("unix_stubs.c")]
-    }
+    fn c_sources(&self, src: &Path) -> Vec<PathBuf>;
 
     /// Extra preprocessor defines / include paths for the C compiler.
     fn configure_c(&self, _build: &mut cc::Build) {}
@@ -32,10 +31,40 @@ pub trait PlatformBuild {
     /// Linker directives emitted to Cargo.
     fn emit_link_directives(&self, _php_lib_dir: &Path) {}
 
-    /// Default value of `PHP_LIB_DIR` (only meaningful on Windows).
+    /// Default value of `PHP_LIB_DIR`.
     fn php_lib_dir_default(&self) -> String {
         String::new()
     }
+}
+
+/// PHP header directories from `PHP_INCLUDES` or `php-config --includes`.
+fn php_include_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+
+    if let Ok(value) = std::env::var("PHP_INCLUDES") {
+        for token in value.split_whitespace() {
+            if let Some(dir) = token.strip_prefix("-I") {
+                dirs.push(PathBuf::from(dir));
+            }
+        }
+    }
+
+    if dirs.is_empty() {
+        if let Ok(output) = Command::new("php-config").arg("--includes").output() {
+            for token in String::from_utf8_lossy(&output.stdout).split_whitespace() {
+                if let Some(dir) = token.strip_prefix("-I") {
+                    dirs.push(PathBuf::from(dir));
+                }
+            }
+        }
+    }
+
+    dirs
+}
+
+/// Name of the PHP embed shared library, e.g. `php8.3`.
+fn php_embed_lib() -> String {
+    std::env::var("PHP_EMBED_LIB").unwrap_or_else(|_| "php8.3".to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -127,11 +156,33 @@ impl PlatformBuild for UnixPlatform {
         self.name
     }
 
-    fn emit_link_directives(&self, _php_lib_dir: &Path) {
-        println!(
-            "cargo:warning=Embedded Zend PHP is Windows-only; building {} with Unix CGI/FastCGI stubs.",
-            self.name
-        );
+    fn c_sources(&self, src: &Path) -> Vec<PathBuf> {
+        // Real PHP SAPI shim; no no-op stubs in release builds.
+        vec![src.join("stubs.c"), src.join("larva_embed_unix.c")]
+    }
+
+    fn configure_c(&self, build: &mut cc::Build) {
+        let dirs = php_include_dirs();
+        if dirs.is_empty() {
+            println!(
+                "cargo:warning=PHP headers not found; set PHP_INCLUDES (e.g. `php-config --includes`)"
+            );
+        }
+        for dir in dirs {
+            build.include(dir);
+        }
+    }
+
+    fn emit_link_directives(&self, php_lib_dir: &Path) {
+        let lib = php_embed_lib();
+        println!("cargo:rustc-link-search=native={}", php_lib_dir.display());
+        println!("cargo:rustc-link-lib=dylib={}", lib);
+        // Ship a runnable binary even when PHP lives outside the system paths.
+        println!("cargo:rustc-link-arg=-Wl,-rpath,{}", php_lib_dir.display());
+    }
+
+    fn php_lib_dir_default(&self) -> String {
+        "/usr/lib".to_string()
     }
 }
 
