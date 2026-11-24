@@ -617,8 +617,15 @@ mod tests {
     fn cli_parser_basic() {
         let parser = CliParser;
         assert_eq!(parser.format(), "cli");
-        let config = parser.parse("C:\\www\\wordpress").unwrap();
-        assert_eq!(config.root, PathBuf::from("C:\\www\\wordpress"));
+        // Use an absolute path for the current OS; a Windows literal is only
+        // absolute when the tests run on Windows.
+        let root = if cfg!(windows) {
+            r"C:\www\wordpress"
+        } else {
+            "/www/wordpress"
+        };
+        let config = parser.parse(root).unwrap();
+        assert_eq!(config.root, PathBuf::from(root));
         assert_eq!(config.server_name, "localhost");
         assert_eq!(config.port, 8000);
     }

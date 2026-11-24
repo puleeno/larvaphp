@@ -1,6 +1,9 @@
 use std::env;
 use std::path::PathBuf;
 
+#[path = "build/platform.rs"]
+mod platform;
+
 /// On Windows, ensure the MSVC environment (cl.exe, INCLUDE, LIB) is set up so
 /// `cargo build` works from a plain shell. If cl.exe is already in PATH, this is
 /// a no-op. Otherwise it locates Visual Studio via vswhere and imports the
@@ -59,91 +62,51 @@ fn ensure_msvc_env() {
     }
 }
 
+#[cfg(not(windows))]
+fn ensure_msvc_env() {}
+
 fn main() {
-    #[cfg(windows)]
+    // Select exactly one platform strategy for this host.
+    let platform = platform::select();
     ensure_msvc_env();
 
-    // ---- PHP library directory ----
-    let php_lib_dir = PathBuf::from(env::var("PHP_LIB_DIR").unwrap_or_else(|_| {
-        r"C:\Program Files\PHP\current\dev".to_string()
-    }));
+    println!("cargo:rerun-if-env-changed=PHP_LIB_DIR");
+    println!("cargo:rerun-if-env-changed=STUB_SRC_DIR");
+    println!("cargo:rerun-if-env-changed=PHP_INCLUDES");
 
-    // ---- Stub C source directory ----
-    let stub_src = PathBuf::from(env::var("STUB_SRC_DIR").unwrap_or_else(|_| {
-        r"C:\Users\Administrator\Projects\LarvaPHP-Web-Server\larva-php\crates\larva-php-sys\src".to_string()
-    }));
-
-    println!("cargo:rerun-if-changed={}", stub_src.join("stubs.c").display());
-    println!("cargo:rerun-if-changed={}", stub_src.join("larva_embed.c").display());
-    println!("cargo:rerun-if-changed={}", stub_src.join("larva_embed.h").display());
-
-    // ---- Link against php8.lib ----
-    println!(
-        "cargo:rustc-link-search={}",
-        php_lib_dir.display()
+    let php_lib_dir = PathBuf::from(
+        env::var("PHP_LIB_DIR").unwrap_or_else(|_| platform.php_lib_dir_default()),
     );
-    println!("cargo:rustc-link-lib=php8");
 
-    // ---- Windows system libraries ----
-    if cfg!(target_os = "windows") {
-        let sdk_lib_base = PathBuf::from(r"C:\Program Files (x86)\Windows Kits\10\Lib");
-        if let Ok(versions) = sdk_lib_base.read_dir() {
-            let ver_dirs: Vec<_> = versions
-                .filter_map(|e| e.ok())
-                .filter(|e| e.file_name().to_string_lossy().starts_with("10.0."))
-                .collect();
-            if let Some(latest) = ver_dirs.iter().max_by_key(|e| e.file_name()) {
-                let sdk_lib = latest.path().join("um").join("x64");
-                println!("cargo:rustc-link-search={}", sdk_lib.display());
-            }
-        }
-        for lib in &["shell32", "user32", "advapi32", "ws2_32", "bcrypt", "crypt32"] {
-            println!("cargo:rustc-link-lib={}", lib);
-        }
+    // Default to this crate's `src` directory; STUB_SRC_DIR can override it.
+    let stub_src = PathBuf::from(env::var("STUB_SRC_DIR").unwrap_or_else(|_| {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("src")
+            .to_string_lossy()
+            .to_string()
+    }));
+
+    let sources = platform.c_sources(&stub_src);
+    for source in &sources {
+        println!("cargo:rerun-if-changed={}", source.display());
     }
 
-    // ---- Compile stubs.c using cc crate ----
-    let stub_path = stub_src.join("stubs.c");
-    let embed_path = stub_src.join("larva_embed.c");
     let mut build = cc::Build::new();
-    if stub_path.exists() {
-        build.file(stub_path);
-    }
-    if embed_path.exists() {
-        build.file(embed_path);
-    }
-
-    // Add VC include directory explicitly
-    if cfg!(target_os = "windows") {
-        let vc_include = PathBuf::from(env::var("INCLUDE").unwrap_or_default());
-        for inc in vc_include.to_string_lossy().split(';') {
-            let inc = inc.trim();
-            if !inc.is_empty() {
-                build.include(PathBuf::from(inc));
-            }
+    build.include(&stub_src);
+    for source in sources {
+        if source.exists() {
+            build.file(source);
         }
-        // Add Windows SDK UCRT for stddef.h, etc.
-        let win_ucrt = PathBuf::from(r"C:\Program Files (x86)\Windows Kits\10\Include\10.0.26100.0\ucrt");
-        if win_ucrt.exists() {
-            build.include(win_ucrt);
-        }
-        build.define("_WINDOWS", None);
-        build.define("WINDOWS", Some("1"));
-        build.define("ZEND_WIN32", Some("1"));
-        build.define("PHP_WIN32", Some("1"));
-        build.define("WIN32", None);
-        build.define("_CRT_SECURE_NO_WARNINGS", None);
-        build.define("_CRT_NONSTDC_NO_DEPRECATE", None);
-        // Do NOT force build.compiler("cl.exe"): that bypasses the cc crate's
-        // vswhere-based MSVC detection and fails in shells without the MSVC env.
-        // cc auto-detects cl.exe via vswhere and sets up INCLUDE/LIB itself.
     }
-
+    platform.configure_c(&mut build);
     build.compile("larva_php_bridge");
 
-    // ---- Bindgen (optional, skipped - using manual ffi.rs) ----
-    let php_includes = env::var("PHP_INCLUDES").unwrap_or_default();
-    if !php_includes.is_empty() {
+    platform.emit_link_directives(&php_lib_dir);
+
+    // Manual FFI declarations are used; bindgen generation is intentionally skipped.
+    if env::var("PHP_INCLUDES").is_ok() {
         println!("cargo:warning=PHP_INCLUDES set but bindgen skipped; using manual ffi.rs.");
     }
+
+    println!("cargo:rustc-env=LARVA_BUILD_PLATFORM={}", platform.name());
 }

@@ -560,8 +560,8 @@ async fn obtain_lets_encrypt_certs(
     _challenge_dir: &std::path::Path,
     _staging: bool,
     _renew_days: u32,
-) -> larva_php::errors::Result<larva_php::acme::CertResult> {
-    Err(crate::errors::Error::Acme(
+) -> larva_php::errors::Result<()> {
+    Err(larva_php::errors::Error::Acme(
         "acme feature not enabled".to_string(),
     ))
 }
