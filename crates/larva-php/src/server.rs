@@ -1156,10 +1156,27 @@ impl Server {
                                 }
                                 let body = Bytes::from(body_bytes);
 
-                                match execute_php_cgi(&path, &ctx, &body, &php_ini) {
-                                    Ok(output) => {
+                                let spawn_result = tokio::task::spawn_blocking(move || {
+                                    execute_php_cgi(&path, &ctx, &body, &php_ini)
+                                }).await;
+                                let output = match spawn_result {
+                                    Ok(inner) => inner,
+                                    Err(join_err) => {
+                                        error!("PHP execution task panicked: {}", join_err);
+                                        return Ok::<Response<Full<Bytes>>, hyper::Error>(
+                                            Response::builder()
+                                                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                                                .body(Full::new(Bytes::from(
+                                                    "Internal Server Error",
+                                                )))
+                                                .unwrap(),
+                                        );
+                                    }
+                                };
+                                match output {
+                                    Ok(cgi_output) => {
                                         let (status_code, headers, body_bytes) =
-                                            parse_cgi_output(&output);
+                                            parse_cgi_output(&cgi_output);
 
                                         // X-Sendfile: serve the referenced file
                                         // directly (efficient large-file serving).
