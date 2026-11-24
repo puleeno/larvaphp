@@ -519,19 +519,47 @@ fn main() -> ExitCode {
         }
 
         // Start the web control panel if --panel is specified.
-        // Runs on a separate TCP port (default 9000).
+        // Runs in a COMPLETELY SEPARATE OS thread with its own Tokio runtime.
+        // If the panel panics or crashes, it cannot affect the main PHP server.
         if let Some(panel_port) = &args.panel {
             #[cfg(feature = "panel")]
             {
                 let port = panel_port.parse::<u16>().unwrap_or(9000);
                 let panel_addr = format!("0.0.0.0:{}", port);
-                tracing::info!("Starting web control panel on http://{}", panel_addr);
-                tokio::spawn(async move {
-                    if let Err(e) = larva_php::panel::start(&panel_addr).await {
-                        tracing::error!("Panel server error: {}", e);
+                tracing::info!("Starting isolated web control panel on http://{}", panel_addr);
+
+                std::thread::spawn(move || {
+                    // Each panel thread gets its own Tokio runtime — fully isolated
+                    // from the main server's runtime. A panic here is contained.
+                    let rt = match tokio::runtime::Builder::new_multi_thread()
+                        .worker_threads(2)
+                        .thread_name("larva-panel")
+                        .enable_all()
+                        .build()
+                    {
+                        Ok(rt) => rt,
+                        Err(e) => {
+                            tracing::error!("failed to create panel tokio runtime: {}", e);
+                            return;
+                        }
+                    };
+
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        rt.block_on(larva_php::panel::start(&panel_addr))
+                    }));
+
+                    match result {
+                        Ok(Err(e)) => tracing::error!("Panel server error: {}", e),
+                        Err(panic_err) => {
+                            tracing::error!("Panel thread panicked: {:?}", panic_err);
+                        }
+                        Ok(Ok(())) => {
+                            tracing::info!("Panel server stopped");
+                        }
                     }
                 });
-                // Give the panel a moment to bind.
+
+                // Give the panel a moment to bind before continuing.
                 std::thread::sleep(std::time::Duration::from_millis(500));
             }
             #[cfg(not(feature = "panel"))]
