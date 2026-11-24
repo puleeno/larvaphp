@@ -71,8 +71,10 @@ fn main() {
     ensure_msvc_env();
 
     println!("cargo:rerun-if-env-changed=PHP_LIB_DIR");
+    println!("cargo:rerun-if-env-changed=PHP_EMBED_LIB");
     println!("cargo:rerun-if-env-changed=STUB_SRC_DIR");
     println!("cargo:rerun-if-env-changed=PHP_INCLUDES");
+    println!("cargo:rerun-if-changed=build/platform.rs");
 
     let php_lib_dir = PathBuf::from(
         env::var("PHP_LIB_DIR").unwrap_or_else(|_| platform.php_lib_dir_default()),

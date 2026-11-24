@@ -140,6 +140,13 @@ impl AcmeClient {
             ACME_PRODUCTION.to_string()
         };
 
+        // reqwest is built with `rustls-no-provider`; install ring as the
+        // process-wide crypto provider. The first call wins, later clients
+        // simply reuse it.
+        let _ = rustls::crypto::CryptoProvider::install_default(
+            rustls::crypto::ring::default_provider(),
+        );
+
         let http = Client::builder()
             .user_agent("LarvaPHP/1.13.5 (https://larvaphp.dev)")
             .timeout(Duration::from_secs(30))

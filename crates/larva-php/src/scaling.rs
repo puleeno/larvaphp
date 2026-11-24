@@ -120,7 +120,7 @@ pub static SCALING: once_cell::sync::Lazy<RwLock<ScalingManager>> =
 
 /// Probe CPU usage to decide if scaling is worthwhile.
 #[cfg(unix)]
-pub fn probe_cpus(probe_time: Duration, max_cpu_usage: f64) -> bool {
+pub fn probe_cpus(probe_time: Duration, _max_cpu_usage: f64) -> bool {
     use std::time::Instant;
     let start = Instant::now();
 

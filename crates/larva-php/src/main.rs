@@ -432,16 +432,27 @@ fn main() -> ExitCode {
 
                 #[cfg(feature = "acme")]
                 {
-                    match obtain_lets_encrypt_certs(
+                    // ACME uses async reqwest; `main` is synchronous, so drive
+                    // the future on a short-lived runtime before the server's
+                    // own runtime is created below.
+                    let acme_rt = match tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                    {
+                        Ok(rt) => rt,
+                        Err(e) => {
+                            eprintln!("failed to start ACME runtime: {}", e);
+                            return ExitCode::from(1);
+                        }
+                    };
+                    match acme_rt.block_on(obtain_lets_encrypt_certs(
                         email,
                         &domains,
                         &cert_dir,
                         &challenge_dir,
                         args.acme_staging,
                         args.acme_renew_days,
-                    )
-                    .await
-                    {
+                    )) {
                         Ok(result) => {
                             tracing::info!(
                                 "Let's Encrypt certificate obtained: {:?}",
@@ -537,8 +548,6 @@ async fn obtain_lets_encrypt_certs(
     staging: bool,
     renew_days: u32,
 ) -> larva_php::errors::Result<larva_php::acme::CertResult> {
-    use std::path::PathBuf;
-
     let config = larva_php::acme::AcmeConfig {
         email: email.to_string(),
         domains: domains.to_vec(),
