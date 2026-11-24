@@ -47,7 +47,12 @@ struct Args {
     #[arg(long = "embedded")]
     embedded: bool,
 
-    /// Path to a TLS certificate (PEM) for HTTP/3. Auto-generated if missing.
+    /// Serve HTTPS directly on --addr using the certificate from --cert/--key
+    /// or from --lets-encrypt. Requires --features tls.
+    #[arg(long = "tls")]
+    tls: bool,
+
+    /// Path to a TLS certificate (PEM) for HTTP/3 and HTTPS.
     #[arg(long = "cert", value_name = "FILE")]
     cert: Option<String>,
 
@@ -370,126 +375,109 @@ fn main() -> ExitCode {
             return ExitCode::from(1);
         }
 
-        // Optionally start the HTTP/3 (QUIC/UDP) listener on the same port.
-        // Browsers that don't support HTTP/3 transparently keep using the TCP
-        // server (HTTP/2 / HTTP/1.1).
-        //
-        // If --lets-encrypt is set, obtain a certificate via ACME first. The
-        // HTTP-01 challenge tokens are served from the challenge directory
-        // (default: <root>/.well-known/acme-challenge/), so the HTTP server
-        // must be reachable on port 80 for validation.
-        let h3_addr = std::net::SocketAddr::new(addr.ip(), addr.port()).to_string();
-        let (h3_cert, h3_key) = match (args.cert.clone(), args.key.clone()) {
-            (Some(c), Some(k)) => (c, k),
-            _ => {
-                let dir = std::env::temp_dir();
-                let c = dir.join("larva-php-cert.pem").to_string_lossy().to_string();
-                let k = dir.join("larva-php-key.pem").to_string_lossy().to_string();
-                (c, k)
+        // Direct TLS mode: LarvaPHP terminates TLS itself. A small HTTP
+        // listener is always started on port 80 so Let's Encrypt HTTP-01
+        // challenges work and plain HTTP requests redirect to HTTPS.
+        let challenge_dir = args
+            .acme_challenge_dir
+            .as_deref()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(&root).join(".well-known/acme-challenge"));
+        let use_tls = args.tls || args.lets_encrypt;
+        if use_tls {
+            let http_addr = std::net::SocketAddr::new(addr.ip(), 80);
+            if let Err(e) =
+                larva_php::tls::spawn_http_challenge_server(http_addr, challenge_dir.clone())
+            {
+                eprintln!("Failed to start HTTP challenge/redirect server: {}", e);
+                return ExitCode::from(1);
             }
+        }
+
+        let (tls_cert, tls_key) = if args.lets_encrypt {
+            if args.acme_email.is_none() || args.acme_domains.is_none() {
+                eprintln!("--lets-encrypt requires --acme-email and --acme-domains");
+                return ExitCode::from(1);
+            }
+            let email = args.acme_email.as_deref().unwrap();
+            let domains: Vec<String> = args
+                .acme_domains
+                .as_deref()
+                .unwrap_or("")
+                .split(',')
+                .map(|d| d.trim().to_string())
+                .filter(|d| !d.is_empty())
+                .collect();
+            if domains.is_empty() {
+                eprintln!("--acme-domains must not be empty");
+                return ExitCode::from(1);
+            }
+            let cert_dir = args
+                .acme_dir
+                .as_deref()
+                .map(PathBuf::from)
+                .unwrap_or_else(|| {
+                    std::env::home_dir()
+                        .unwrap_or_else(|| PathBuf::from("."))
+                        .join(".larva-php")
+                        .join("letsencrypt")
+                });
+
+            #[cfg(feature = "acme")]
+            {
+                let acme_rt = match tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    Ok(rt) => rt,
+                    Err(e) => {
+                        eprintln!("failed to start ACME runtime: {}", e);
+                        return ExitCode::from(1);
+                    }
+                };
+                match acme_rt.block_on(obtain_lets_encrypt_certs(
+                    email,
+                    &domains,
+                    &cert_dir,
+                    &challenge_dir,
+                    args.acme_staging,
+                    args.acme_renew_days,
+                )) {
+                    Ok(result) => (
+                        result.fullchain_path.to_string_lossy().to_string(),
+                        result.key_path.to_string_lossy().to_string(),
+                    ),
+                    Err(e) => {
+                        eprintln!("Let's Encrypt certificate failed: {}", e);
+                        return ExitCode::from(1);
+                    }
+                }
+            }
+            #[cfg(not(feature = "acme"))]
+            {
+                eprintln!("--lets-encrypt requires building with --features acme");
+                return ExitCode::from(1);
+            }
+        } else if let (Some(c), Some(k)) = (args.cert.clone(), args.key.clone()) {
+            (c, k)
+        } else if use_tls {
+            eprintln!("--tls requires --cert/--key or --lets-encrypt");
+            return ExitCode::from(1);
+        } else {
+            (String::new(), String::new())
         };
 
         #[cfg(feature = "http3")]
         if args.http3 || args.lets_encrypt {
-            // Obtain a Let's Encrypt certificate if requested.
-            let (le_cert, le_key) = if args.lets_encrypt {
-                if args.acme_email.is_none() || args.acme_domains.is_none() {
-                    eprintln!(
-                        "--lets-encrypt requires --acme-email and --acme-domains"
-                    );
-                    return ExitCode::from(1);
-                }
-                let email = args.acme_email.as_deref().unwrap();
-                let domains: Vec<String> = args
-                    .acme_domains
-                    .as_deref()
-                    .unwrap_or("")
-                    .split(',')
-                    .map(|d| d.trim().to_string())
-                    .filter(|d| !d.is_empty())
-                    .collect();
-                if domains.is_empty() {
-                    eprintln!("--acme-domains must not be empty");
-                    return ExitCode::from(1);
-                }
-                let cert_dir = args
-                    .acme_dir
-                    .as_deref()
-                    .map(PathBuf::from)
-                    .unwrap_or_else(|| {
-                        std::env::home_dir()
-                            .unwrap_or_else(|| PathBuf::from("."))
-                            .join(".larva-php")
-                            .join("letsencrypt")
-                    });
-                let challenge_dir = args
-                    .acme_challenge_dir
-                    .as_deref()
-                    .map(PathBuf::from)
-                    .unwrap_or_else(|| {
-                        PathBuf::from(&root).join(".well-known/acme-challenge")
-                    });
-
-                #[cfg(feature = "acme")]
-                {
-                    // ACME uses async reqwest; `main` is synchronous, so drive
-                    // the future on a short-lived runtime before the server's
-                    // own runtime is created below.
-                    let acme_rt = match tokio::runtime::Builder::new_current_thread()
-                        .enable_all()
-                        .build()
-                    {
-                        Ok(rt) => rt,
-                        Err(e) => {
-                            eprintln!("failed to start ACME runtime: {}", e);
-                            return ExitCode::from(1);
-                        }
-                    };
-                    match acme_rt.block_on(obtain_lets_encrypt_certs(
-                        email,
-                        &domains,
-                        &cert_dir,
-                        &challenge_dir,
-                        args.acme_staging,
-                        args.acme_renew_days,
-                    )) {
-                        Ok(result) => {
-                            tracing::info!(
-                                "Let's Encrypt certificate obtained: {:?}",
-                                result.cert_path
-                            );
-                            (
-                                result.cert_path.to_string_lossy().to_string(),
-                                result.key_path.to_string_lossy().to_string(),
-                            )
-                        }
-                        Err(e) => {
-                            eprintln!("Let's Encrypt certificate failed: {}", e);
-                            return ExitCode::from(1);
-                        }
-                    }
-                }
-                #[cfg(not(feature = "acme"))]
-                {
-                    eprintln!(
-                        "--lets-encrypt requires building with --features acme"
-                    );
-                    return ExitCode::from(1);
-                }
-            } else {
-                (h3_cert.clone(), h3_key.clone())
-            };
-
-            let server_arc = std::sync::Arc::new(larva_php::server::Server::new(&root).unwrap());
-            match larva_php::http3::ensure_cert(&le_cert, &le_key) {
+            let h3_addr = std::net::SocketAddr::new(addr.ip(), addr.port()).to_string();
+            match larva_php::http3::ensure_cert(&tls_cert, &tls_key) {
                 Ok((cert, key)) => {
                     let h3 = larva_php::http3::Http3Server::new(
                         h3_addr.clone(),
                         cert,
                         key,
-                        server_arc,
+                        std::sync::Arc::new(larva_php::server::Server::new(&root).unwrap()),
                     );
-                    // Advertise HTTP/3 on TCP responses via Alt-Svc.
                     larva_php::server::set_http3_port(addr.port());
                     std::thread::spawn(move || {
                         if let Err(e) = h3.run() {
@@ -505,18 +493,25 @@ fn main() -> ExitCode {
             }
         }
 
-        #[cfg(not(feature = "http3"))]
-        if args.lets_encrypt {
-            eprintln!(
-                "--lets-encrypt requires building with --features http3,acme"
-            );
-            return ExitCode::from(1);
-        }
-
         // Start HTTP server
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
-            if let Err(e) = server.start_server(addr).await {
+            let result = if use_tls {
+                #[cfg(feature = "tls")]
+                {
+                    server.start_server_tls(addr, &tls_cert, &tls_key).await
+                }
+                #[cfg(not(feature = "tls"))]
+                {
+                    eprintln!("--tls requires building with --features tls");
+                    Err(larva_php::errors::Error::Acme(
+                        "tls feature not enabled".to_string(),
+                    ))
+                }
+            } else {
+                server.start_server(addr).await
+            };
+            if let Err(e) = result {
                 eprintln!("Server error: {}", e);
                 ExitCode::from(1)
             } else {
