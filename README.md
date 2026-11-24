@@ -80,6 +80,32 @@ cargo with your arguments:
 cargo build --release
 ```
 
+### Platform build strategies (Windows / Linux / macOS)
+
+Build-time platform handling uses the **Strategy pattern** in
+[`crates/larva-php-sys/build/platform.rs`](crates/larva-php-sys/build/platform.rs).
+`build.rs` talks only to the `PlatformBuild` trait; `select()` is the factory
+that picks exactly one strategy for the host OS, so platform code never
+conflicts or gets mixed together:
+
+| Strategy | Host OS | C bridge | Linking | Embedded PHP |
+|----------|---------|----------|---------|--------------|
+| `WindowsPlatform` | Windows | `stubs.c` + `larva_embed.c` | `php8.lib`, MSVC libs | supported (`php8.dll`) |
+| `LinuxPlatform` | Linux | `stubs.c` + `unix_stubs.c` | none extra | not supported (stubs return errors) |
+| `MacosPlatform` | macOS | `stubs.c` + `unix_stubs.c` | none extra | not supported (stubs return errors) |
+
+Linux and macOS share the `UnixPlatform` implementation but are distinct
+named strategies, so they can diverge later without touching shared code.
+The old MSVC-only `+crt-static` flag was removed from
+[`.cargo/config.toml`](.cargo/config.toml) for Linux/macOS (it broke host
+proc-macro artifacts).
+
+```bash
+# Linux / macOS (release binary at target/release/larva-php)
+cargo build --release -p larva-php --bin larva-php
+cargo test --lib
+```
+
 ### Serve a PHP Application
 
 ```powershell

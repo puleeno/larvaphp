@@ -2094,8 +2094,10 @@ mod tests {
 
     #[test]
     fn server_new_sets_defaults() {
-        let server = Server::new("C:\\www").unwrap();
-        assert_eq!(server.root(), "C:\\www");
+        // Absolute path for the current OS (C:\... is only absolute on Windows).
+        let root = if cfg!(windows) { r"C:\www" } else { "/www" };
+        let server = Server::new(root).unwrap();
+        assert_eq!(server.root(), root);
         assert_eq!(server.split_path(), &[".php".to_string()]);
         assert_eq!(server.max_body_size, 10 * 1024 * 1024);
         assert!(!server.is_registered());

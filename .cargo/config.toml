@@ -1,22 +1,19 @@
-# Static linking configuration for LarvaPHP.
+# Build configuration for LarvaPHP.
 #
-# Statically links the C runtime so the produced binary is self-contained and
-# does not depend on external CRT DLLs (MSVC: vcruntime140.dll, ucrtbase.dll).
-# This makes the binary portable across machines with the same architecture.
+# Windows: statically link the C runtime so the binary is self-contained and
+# does not depend on external CRT DLLs (vcruntime140.dll, ucrtbase.dll).
 #
-# For a *fully* static Linux binary (no glibc), build with the musl target:
-#
-#   rustup target add x86_64-unknown-linux-musl
-#   cargo build --release --target x86_64-unknown-linux-musl -p larva-php
-#
-# The static CRT flags below apply to normal host builds. If you need a
-# dynamically-linked debug build for development, override with:
-#
-#   RUSTFLAGS="" cargo build            # ignore these flags
-#   cargo build --config 'target.x86_64-pc-windows-msvc.rustflags=[]'
+# Linux/macOS: no forced static linking. `+crt-static` is an MSVC concept; on
+# Linux it also breaks host proc-macro artifacts (e.g. clap_derive). Platform
+# selection lives in `crates/larva-php-sys/build/platform.rs`.
 
 [target.x86_64-pc-windows-msvc]
 rustflags = ["-C", "target-feature=+crt-static"]
 
-[target.x86_64-unknown-linux-gnu]
-rustflags = ["-C", "target-feature=+crt-static"]
+# If you need a dynamically-linked debug build on Windows, override with:
+#   RUSTFLAGS="" cargo build
+#   cargo build --config 'target.x86_64-pc-windows-msvc.rustflags=[]'
+
+# For a fully static Linux binary (no glibc), use the musl target instead:
+#   rustup target add x86_64-unknown-linux-musl
+#   cargo build --release --target x86_64-unknown-linux-musl -p larva-php
