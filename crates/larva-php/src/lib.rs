@@ -45,6 +45,9 @@ pub mod thread;
 pub mod types;
 pub mod worker;
 
+#[cfg(feature = "acme")]
+pub mod acme;
+
 #[cfg(feature = "mercure")]
 pub mod mercure;
 

@@ -102,6 +102,9 @@ pub enum Error {
 
     #[error("serialization error: {0}")]
     Serde(#[from] serde_json::Error),
+
+    #[error("ACME / Let's Encrypt error: {0}")]
+    Acme(String),
 }
 
 /// Mirrors the `ErrRejected` type from `frankenphp.go`.
