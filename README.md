@@ -123,6 +123,11 @@ cargo test --lib --features embedded,http3,acme,mercure
 `PHP_LIB_DIR` is embedded in the binary's RUNPATH, so the resulting binary runs
 without setting `LD_LIBRARY_PATH`.
 
+To run the all-feature release as a daemon, see
+[`docs/linux-daemon-service.md`](docs/linux-daemon-service.md). Ready-to-use
+systemd units and an env template live in
+[`deploy/systemd/`](deploy/systemd/).
+
 ### Serve a PHP Application
 
 ```powershell
