@@ -212,9 +212,7 @@ pub fn panel_html() -> String {
         .glow-text { text-shadow: 0 0 10px rgba(0, 242, 255, 0.3); }
     </style>
 </head>
-<body x-data="{ sidebarOpen: false, alert: null, alertType: 'info' }"
-      x-init="fetchStats()"
-      class="min-h-screen">
+<body x-data="init()" x-init="fetchStats()" class="min-h-screen">
 
     <!-- Sidebar -->
     <aside class="sidebar" :class="{ 'mobile-open': sidebarOpen }">
