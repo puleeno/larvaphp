@@ -1,10 +1,10 @@
 //! HTML templates for the control panel.
 //! Single-file SPA with Tailwind CSS + Alpine.js.
+//! Ant Design inspired: clean, professional, blue/gray palette.
 
 /// Main HTML page served at all panel routes (SPA).
 pub fn panel_html() -> String {
     r#"<!DOCTYPE html>
-<html lang="en">
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -13,272 +13,170 @@ pub fn panel_html() -> String {
     <script src="https://cdn.tailwindcss.com"></script>
     <script defer src="https://unpkg.com/alpinejs@3.x/dist/cdn.min.js"></script>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <style>
-        @import url('https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css');
         :root {
-            --cyber-primary: #00f2ff;
-            --cyber-secondary: #7000ff;
-            --cyber-accent: #00ff9f;
-            --cyber-bg: #050510;
-            --cyber-surface: #0a0a1a;
-            --cyber-border: #1a1a2e;
-            --cyber-text: #e0e0ff;
-            --cyber-text-muted: #8888aa;
+            --ad-primary: #1677ff;
+            --ad-primary-hover: #4096ff;
+            --ad-primary-active: #096dd9;
+            --ad-bg: #ffffff;
+            --ad-bg-secondary: #f5f7f9;
+            --ad-text: #000000;
+            --ad-text-secondary: #595959;
+            --ad-text-tertiary: #999999;
+            --ad-border: #d9d9d9;
+            --ad-border-hover: #4096ff;
+            --ad-success: #52c41a;
+            --ad-warning: #faad14;
+            --ad-error: #f5222d;
+            --ad-radius: 6px;
+            --ad-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+            --ad-font: 'Inter', sans-serif;
+            --ad-mono: 'JetBrains Mono', monospace;
         }
         * { box-sizing: border-box; margin: 0; padding: 0; }
         html { scroll-behavior: smooth; }
         body {
-            font-family: 'Inter', sans-serif;
-            background: var(--cyber-bg);
-            color: var(--cyber-text);
+            font-family: var(--ad-font);
+            background: var(--ad-bg-secondary);
+            color: var(--ad-text);
             min-h-screen: 100vh;
+            line-height: 1.5715;
         }
-        .font-mono { font-family: 'JetBrains Mono', monospace; }
-        .bg-cyber { background: var(--cyber-bg); }
-        .bg-cyber-surface { background: var(--cyber-surface); }
-        .border-cyber { border-color: var(--cyber-border); }
-        .text-cyber-primary { color: var(--cyber-primary); }
-        .text-cyber-accent { color: var(--cyber-accent); }
-        .text-cyber-secondary { color: var(--cyber-secondary); }
-        .bg-cyber-primary { background: var(--cyber-primary); color: #000; }
-        .bg-cyber-secondary { background: var(--cyber-secondary); }
-        .bg-cyber-accent { background: var(--cyber-accent); color: #000; }
-        .shadow-cyber { box-shadow: 0 0 20px rgba(0, 242, 255, 0.15); }
-        .shadow-cyber-lg { box-shadow: 0 0 40px rgba(112, 0, 255, 0.2); }
-        .cyber-card {
-            background: var(--cyber-surface);
-            border: 1px solid var(--cyber-border);
-            border-radius: 12px;
-            transition: all 0.3s ease;
+        .font-mono { font-family: var(--ad-mono); }
+        .ad-sidebar { width: 240px; flex-shrink: 0; }
+        .ad-main { margin-left: 240px; }
+        @media (max-width: 768px) {
+            .ad-sidebar { position: fixed; top: 0; left: 0; bottom: 0; z-index: 40; transform: translateX(-100%); transition: transform 0.3s ease; }
+            .ad-sidebar.mobile-open { transform: translateX(0); }
+            .ad-main { margin-left: 0; }
+            .mobile-menu-btn { display: block; }
         }
-        .cyber-card:hover {
-            border-color: rgba(0, 242, 255, 0.3);
-            transform: translateY(-2px);
-            box-shadow: 0 4px 20px rgba(0, 242, 255, 0.1);
-        }
-        .btn-cyber {
-            background: linear-gradient(135deg, var(--cyber-primary), var(--cyber-secondary));
-            color: white;
-            border: none;
-            border-radius: 8px;
-            padding: 0.75rem 1.5rem;
-            font-weight: 600;
-            transition: all 0.3s ease;
-            cursor: pointer;
-            text-transform: uppercase;
-            font-size: 0.875rem;
-            letter-spacing: 0.05em;
-        }
-        .btn-cyber:hover {
-            transform: translateY(-1px);
-            box-shadow: 0 0 15px rgba(0, 242, 255, 0.4);
-        }
-        .btn-cyber:active { transform: translateY(0); }
-        .btn-ghost {
-            background: transparent;
-            color: var(--cyber-text);
-            border: 1px solid var(--cyber-border);
-            border-radius: 8px;
-            padding: 0.75rem 1.5rem;
-            font-weight: 500;
-            transition: all 0.3s ease;
-            cursor: pointer;
-        }
-        .btn-ghost:hover {
-            border-color: var(--cyber-primary);
-            color: var(--cyber-primary);
-            background: rgba(0, 242, 255, 0.05);
-        }
-        .input-cyber {
-            background: rgba(10, 10, 26, 0.6);
-            border: 1px solid var(--cyber-border);
-            border-radius: 8px;
-            padding: 0.75rem 1rem;
-            color: var(--cyber-text);
-            width: 100%;
-            transition: all 0.3s ease;
-        }
-        .input-cyber:focus {
-            outline: none;
-            border-color: var(--cyber-primary);
-            box-shadow: 0 0 0 2px rgba(0, 242, 255, 0.2);
-        }
-        .select-cyber {
-            background: rgba(10, 10, 26, 0.6);
-            border: 1px solid var(--cyber-border);
-            border-radius: 8px;
-            padding: 0.75rem 1rem;
-            color: var(--cyber-text);
-            width: 100%;
-            cursor: pointer;
-        }
-        .nav-item {
-            padding: 0.875rem 1.25rem;
-            border-radius: 8px;
-            color: var(--cyber-text-muted);
-            font-weight: 500;
-            transition: all 0.2s ease;
-            cursor: pointer;
-            display: flex;
-            align-items: center;
-            gap: 0.75rem;
-        }
-        .nav-item:hover {
-            background: rgba(0, 242, 255, 0.05);
-            color: var(--cyber-primary);
-        }
-        .nav-item.active {
-            background: linear-gradient(135deg, rgba(0, 242, 255, 0.15), rgba(112, 0, 255, 0.15));
-            color: var(--cyber-primary);
-            border-left: 3px solid var(--cyber-primary);
-        }
-        .stat-card {
-            background: var(--cyber-surface);
-            border: 1px solid var(--cyber-border);
-            border-radius: 12px;
-            padding: 1.5rem;
-            position: relative;
-            overflow: hidden;
-        }
-        .stat-card::before {
-            content: '';
-            position: absolute;
-            top: 0; left: 0; right: 0; height: 2px;
-            background: linear-gradient(90deg, var(--cyber-primary), var(--cyber-secondary));
-        }
-        .badge {
-            display: inline-flex;
-            align-items: center;
-            padding: 0.25rem 0.75rem;
-            border-radius: 9999px;
-            font-size: 0.75rem;
-            font-weight: 600;
-            text-transform: uppercase;
-        }
-        .badge-active { background: rgba(0, 255, 159, 0.15); color: var(--cyber-accent); border: 1px solid rgba(0, 255, 159, 0.3); }
-        .badge-stopped { background: rgba(255, 0, 100, 0.15); color: #ff0064; border: 1px solid rgba(255, 0, 100, 0.3); }
-        .badge-error { background: rgba(255, 170, 0, 0.15); color: #ffaa00; border: 1px solid rgba(255, 170, 0, 0.3); }
+        .mobile-menu-btn { display: none; }
+        .ad-topbar { position: fixed; top: 0; left: 240px; right: 0; height: 64px; z-index: 30; }
+        @media (max-width: 768px) { .ad-topbar { left: 0; } }
+        .ad-mobile-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.08); z-index: 39; display: none; }
+        .ad-mobile-overlay.mobile-open { display: block; }
+        .ad-logo { height: 32px; width: 32px; border-radius: 6px; background: linear-gradient(135deg, #1677ff, #4096ff); display: flex; align-items: center; justify-content: center; color: #fff; font-size: 14px; }
+        .nav-item-active { background: #e6f4ff; color: #1677ff; border-left: 3px solid #1677ff; }
+        .nav-item-active .fa { color: #1677ff; }
+        .page-title { font-size: 20px; font-weight: 600; color: #000; }
+        .page-subtitle { font-size: 14px; color: #999; margin-top: 4px; }
+        .stat-card-value { font-size: 24px; font-weight: 600; color: #000; }
+        .stat-card-label { font-size: 12px; font-weight: 600; color: #999; text-transform: uppercase; letter-spacing: 0.05em; margin-top: 6px; }
+        .ad-card-title { font-size: 14px; font-weight: 600; color: #000; margin-bottom: 16px; }
+        .progress-h { height: 8px; border-radius: 4px; background: #f0f0f0; overflow: hidden; }
+        .progress-fill { height: 100%; border-radius: 4px; transition: width 0.3s ease; }
+        .badge { display: inline-flex; align-items: center; padding: 2px 10px; border-radius: 6px; font-size: 11px; font-weight: 600; text-transform: uppercase; }
+        .badge-default { background: #f0f0f0; color: #666; }
+        .badge-primary { background: #e6f4ff; color: #1677ff; }
+        .badge-success { background: #f6ffed; color: #52c41a; border: 1px solid #b7eb8f; }
+        .badge-warning { background: #fff7e6; color: #faad14; border: 1px solid #ffd591; }
+        .badge-error { background: #fff1f0; color: #f5222d; border: 1px solid #ffa39e; }
+        .alert { padding: 10px 16px; border-radius: 6px; font-size: 14px; margin-bottom: 16px; }
+        .alert-info { background: #e6f4ff; border: 1px solid #91caff; color: #1677ff; }
+        .alert-success { background: #f6ffed; border: 1px solid #b7eb8f; color: #52c41a; }
+        .alert-error { background: #fff1f0; border: 1px solid #ffa39e; color: #f5222d; }
         .table-wrapper { overflow-x: auto; }
         table { width: 100%; border-collapse: collapse; }
-        th { text-align: left; padding: 1rem; color: var(--cyber-text-muted); font-size: 0.75rem; text-transform: uppercase; font-weight: 600; border-bottom: 1px solid var(--cyber-border); }
-        td { padding: 1rem; border-bottom: 1px solid var(--cyber-border); color: var(--cyber-text); font-size: 0.9rem; }
-        tr:hover td { background: rgba(0, 242, 255, 0.03); }
-        .progress-bar {
-            width: 100%; height: 6px; background: var(--cyber-border); border-radius: 3px; overflow: hidden;
-        }
-        .progress-fill { height: 100%; border-radius: 3px; transition: width 0.5s ease; }
-        .progress-fill-primary { background: var(--cyber-primary); }
-        .progress-fill-secondary { background: var(--cyber-secondary); }
-        .progress-fill-accent { background: var(--cyber-accent); }
-        .modal-overlay {
-            position: fixed; top: 0; left: 0; right: 0; bottom: 0;
-            background: rgba(5, 5, 16, 0.8);
-            backdrop-filter: blur(8px);
-            z-index: 50; display: none;
-            align-items: center; justify-content: center;
-        }
+        th { text-align: left; padding: 12px 16px; font-size: 12px; font-weight: 600; color: #999; text-transform: uppercase; letter-spacing: 0.05em; border-bottom: 1px solid #f0f0f0; }
+        td { padding: 12px 16px; border-bottom: 1px solid #f0f0f0; color: #000; font-size: 14px; }
+        tr:hover td { background: #fafafa; }
+        .btn-primary { background: #1677ff; color: #fff; border: none; border-radius: 6px; padding: 8px 24px; font-weight: 500; font-size: 14px; cursor: pointer; transition: background 0.2s; }
+        .btn-primary:hover { background: #4096ff; }
+        .btn-default { background: #fff; color: #000; border: 1px solid #d9d9d9; border-radius: 6px; padding: 8px 24px; font-weight: 500; font-size: 14px; cursor: pointer; transition: all 0.2s; }
+        .btn-default:hover { border-color: #4096ff; color: #1677ff; background: #f6f8ff; }
+        .btn-text { background: none; border: none; color: #1677ff; font-size: 14px; cursor: pointer; padding: 4px 8px; border-radius: 4px; }
+        .btn-text:hover { background: #e6f4ff; }
+        .btn-danger-text { color: #f5222d; }
+        .btn-danger-text:hover { background: #fff1f0; }
+        .input-default { border: 1px solid #d9d9d9; border-radius: 6px; padding: 8px 12px; font-size: 14px; width: 100%; background: #fff; color: #000; transition: border 0.2s, box-shadow 0.2s; outline: none; }
+        .input-default:focus { border-color: #4096ff; box-shadow: 0 0 0 2px rgba(22, 119, 255, 0.1); }
+        .select-default { border: 1px solid #d9d9d9; border-radius: 6px; padding: 8px 12px; font-size: 14px; width: 100%; background: #fff; color: #000; cursor: pointer; outline: none; }
+        .select-default:focus { border-color: #4096ff; box-shadow: 0 0 0 2px rgba(22, 119, 255, 0.1); }
+        .form-label { display: block; margin-bottom: 8px; font-size: 14px; font-weight: 500; color: #000; }
+        .form-group { margin-bottom: 24px; }
+        .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.24); z-index: 50; display: none; align-items: center; justify-content: center; backdrop-filter: blur(2px); }
         .modal-overlay.active { display: flex; }
-        .modal {
-            background: var(--cyber-surface);
-            border: 1px solid var(--cyber-border);
-            border-radius: 12px;
-            padding: 2rem;
-            width: 90%; max-width: 500px;
-            max-height: 90vh; overflow-y: auto;
-            transform: scale(0.95); transition: transform 0.3s ease;
-        }
-        .modal-overlay.active .modal { transform: scale(1); }
-        .form-group { margin-bottom: 1.25rem; }
-        .form-label { display: block; margin-bottom: 0.5rem; color: var(--cyber-text-muted); font-size: 0.875rem; font-weight: 500; text-transform: uppercase; letter-spacing: 0.05em; }
-        .alert {
-            padding: 1rem; border-radius: 8px; margin-bottom: 1rem; font-size: 0.9rem;
-        }
-        .alert-success { background: rgba(0, 255, 159, 0.1); border: 1px solid rgba(0, 255, 159, 0.3); color: var(--cyber-accent); }
-        .alert-error { background: rgba(255, 0, 100, 0.1); border: 1px solid rgba(255, 0, 100, 0.3); color: #ff0064; }
-        .alert-info { background: rgba(0, 242, 255, 0.1); border: 1px solid rgba(0, 242, 255, 0.3); color: var(--cyber-primary); }
-        .animate-pulse-slow { animation: pulse 3s cubic-bezier(0.4, 0, 0.6, 1) infinite; }
-        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
-        .sidebar { position: fixed; top: 0; left: 0; bottom: 0; width: 260px; background: var(--cyber-surface); border-right: 1px solid var(--cyber-border); z-index: 40; transform: translateX(0); transition: transform 0.3s ease; }
-        @media (max-width: 768px) { .sidebar { transform: translateX(-100%); } .sidebar.mobile-open { transform: translateX(0); } }
-        .main-content { margin-left: 260px; }
-        @media (max-width: 768px) { .main-content { margin-left: 0; } }
-        .mobile-menu-btn { display: none; }
-        @media (max-width: 768px) { .mobile-menu-btn { display: block; } }
-        .topbar { position: fixed; top: 0; left: 260px; right: 0; height: 64px; background: var(--cyber-surface); border-bottom: 1px solid var(--cyber-border); z-index: 30; display: flex; align-items: center; justify-content: space-between; padding: 0 1.5rem; }
-        @media (max-width: 768px) { .topbar { left: 0; } }
-        .loading-spinner { border: 3px solid var(--cyber-border); border-top: 3px solid var(--cyber-primary); border-radius: 50%; width: 24px; height: 24px; animation: spin 1s linear infinite; }
-        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
-        .text-gradient { background: linear-gradient(135deg, var(--cyber-primary), var(--cyber-secondary)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
-        .glow-text { text-shadow: 0 0 10px rgba(0, 242, 255, 0.3); }
+        .modal { background: #fff; border: 1px solid #d9d9d9; border-radius: 8px; padding: 24px; width: 90%; max-width: 480px; max-height: 90vh; overflow-y: auto; box-shadow: 0 4px 12px rgba(0,0,0,0.15); transform: scale(0.98); opacity: 0; transition: transform 0.2s, opacity 0.2s; }
+        .modal-overlay.active .modal { transform: scale(1); opacity: 1; }
+        .modal-close-btn { position: absolute; right: 16px; top: 16px; background: none; border: none; color: #999; cursor: pointer; font-size: 18px; }
+        .modal-close-btn:hover { color: #000; }
+        .animate-spin { animation: adspin 1s linear infinite; }
+        @keyframes adspin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+        .text-gradient { background: linear-gradient(135deg, #1677ff, #4096ff); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+        .empty-state { text-align: center; padding: 48px 24px; color: #999; }
+        .empty-state i { font-size: 48px; margin-bottom: 16px; opacity: 0.4; }
     </style>
 </head>
-<body x-data="init()" x-init="fetchStats()" class="min-h-screen">
+<body x-data="{ currentPage: 'dashboard', sidebarOpen: false, alert: null, alertType: 'info', stats: { total_websites: 0, active_websites: 0, total_workers: 0, running_workers: 0, ssl_certificates: 0, requests_today: 0, cpu_usage: 0, memory_usage: 0, disk_usage: 0 }, websites: [], sslCerts: [], workers: [], files: [], fileDir: '/', showAddWebsiteModal: false, showAddSslModal: false, showAddUserModal: false, newWebsite: { name: '', domain: '', document_root: '', php_version: '8.3', ssl_enabled: false, acme_email: '', acme_domains: '', worker_count: 1 }, sslForm: { email: '', domains: '' }, newUser: { username: '', password: '', role: 'admin', email: '' }, pageTitle: 'Dashboard' }" x-init="fetchStats()" class="min-h-screen">
+
+    <!-- Mobile overlay -->
+    <div x-show="sidebarOpen" x-transition @click="sidebarOpen = false" class="ad-mobile-overlay"></div>
 
     <!-- Sidebar -->
-    <aside class="sidebar" :class="{ 'mobile-open': sidebarOpen }">
-        <div class="p-6 flex items-center gap-3">
-            <div class="w-8 h-8 bg-gradient-to-br from-cyber-primary to-cyber-secondary rounded-lg flex items-center justify-center shadow-cyber-lg">
-                <i class="fa fa-rocket text-white text-sm"></i>
-            </div>
-            <span class="font-bold text-lg text-cyber-primary tracking-tight">Larva<span class="text-white">PHP</span></span>
+    <aside class="ad-sidebar bg-white border-r border-gray-200 shadow-sm" :class="{ 'mobile-open': sidebarOpen }">
+        <div class="px-5 py-4 flex items-center gap-3">
+            <div class="ad-logo text-xs font-bold text-white leading-none flex items-center justify-center"><i class="fa fa-rocket"></i></div>
+            <span class="font-bold text-lg text-gray-900 tracking-tight">Larva<span class="text-blue-600">PHP</span></span>
         </div>
-        <nav class="mt-6 px-4 space-y-1">
-            <div class="text-xs font-bold text-cyber-text-muted uppercase px-4 mb-4">Navigation</div>
-            <button @click="currentPage='dashboard'; closeModal()" class="nav-item" :class="{ 'active': currentPage === 'dashboard' }">
-                <i class="fa fa-chart-line w-5"></i> Dashboard
+        <nav class="mt-5 px-3 space-y-0.5">
+            <div class="text-xs font-bold text-gray-400 uppercase px-3 mb-3">Navigation</div>
+            <button @click="currentPage='dashboard'; sidebarOpen=false" class="w-full flex items-center gap-3 px-3 py-2.5 text-sm rounded-l-lg transition-colors" :class="{ 'nav-item-active': currentPage === 'dashboard' }">
+                <i class="fa fa-chart-line w-5 text-gray-400"></i> <span class="text-gray-700 font-medium">Dashboard</span>
             </button>
-            <button @click="currentPage='websites'; closeModal()" class="nav-item" :class="{ 'active': currentPage === 'websites' }">
-                <i class="fa fa-globe w-5"></i> Websites
+            <button @click="currentPage='websites'; sidebarOpen=false" class="w-full flex items-center gap-3 px-3 py-2.5 text-sm rounded-l-lg transition-colors" :class="{ 'nav-item-active': currentPage === 'websites' }">
+                <i class="fa fa-globe w-5 text-gray-400"></i> <span class="text-gray-700 font-medium">Websites</span>
             </button>
-            <button @click="currentPage='ssl'; closeModal()" class="nav-item" :class="{ 'active': currentPage === 'ssl' }">
-                <i class="fa fa-lock w-5"></i> SSL / TLS
+            <button @click="currentPage='ssl'; sidebarOpen=false" class="w-full flex items-center gap-3 px-3 py-2.5 text-sm rounded-l-lg transition-colors" :class="{ 'nav-item-active': currentPage === 'ssl' }">
+                <i class="fa fa-lock w-5 text-gray-400"></i> <span class="text-gray-700 font-medium">SSL / TLS</span>
             </button>
-            <button @click="currentPage='workers'; closeModal()" class="nav-item" :class="{ 'active': currentPage === 'workers' }">
-                <i class="fa fa-cogs w-5"></i> PHP Workers
+            <button @click="currentPage='workers'; sidebarOpen=false" class="w-full flex items-center gap-3 px-3 py-2.5 text-sm rounded-l-lg transition-colors" :class="{ 'nav-item-active': currentPage === 'workers' }">
+                <i class="fa fa-cogs w-5 text-gray-400"></i> <span class="text-gray-700 font-medium">PHP Workers</span>
             </button>
-            <button @click="currentPage='files'; closeModal()" class="nav-item" :class="{ 'active': currentPage === 'files' }">
-                <i class="fa fa-folder w-5"></i> File Manager
+            <button @click="currentPage='files'; sidebarOpen=false" class="w-full flex items-center gap-3 px-3 py-2.5 text-sm rounded-l-lg transition-colors" :class="{ 'nav-item-active': currentPage === 'files' }">
+                <i class="fa fa-folder w-5 text-gray-400"></i> <span class="text-gray-700 font-medium">File Manager</span>
             </button>
-            <button @click="currentPage='users'; closeModal()" class="nav-item" :class="{ 'active': currentPage === 'users' }">
-                <i class="fa fa-users w-5"></i> Users
+            <button @click="currentPage='users'; sidebarOpen=false" class="w-full flex items-center gap-3 px-3 py-2.5 text-sm rounded-l-lg transition-colors" :class="{ 'nav-item-active': currentPage === 'users' }">
+                <i class="fa fa-users w-5 text-gray-400"></i> <span class="text-gray-700 font-medium">Users</span>
             </button>
-            <button @click="currentPage='settings'; closeModal()" class="nav-item" :class="{ 'active': currentPage === 'settings' }">
-                <i class="fa fa-sliders-h w-5"></i> Settings
+            <button @click="currentPage='settings'; sidebarOpen=false" class="w-full flex items-center gap-3 px-3 py-2.5 text-sm rounded-l-lg transition-colors" :class="{ 'nav-item-active': currentPage === 'settings' }">
+                <i class="fa fa-sliders-h w-5 text-gray-400"></i> <span class="text-gray-700 font-medium">Settings</span>
             </button>
         </nav>
-        <div class="absolute bottom-0 left-0 right-0 p-4 border-t border-cyber-border">
-            <button @click="sidebarOpen = false" class="w-full btn-ghost text-sm">
-                <i class="fa fa-power-off mr-2"></i> Logout
+        <div class="absolute bottom-0 left-0 right-0 p-4 border-t border-gray-100">
+            <button @click="sidebarOpen=false" class="w-full btn-text text-sm text-gray-600 hover:text-red-600 hover:bg-red-50 flex items-center gap-2">
+                <i class="fa fa-power-off"></i> Logout
             </button>
         </div>
     </aside>
 
-    <!-- Mobile overlay -->
-    <div x-show="sidebarOpen" x-transition @click="sidebarOpen = false" class="fixed inset-0 bg-black/40 z-49"></div>
-
     <!-- Topbar -->
-    <header class="topbar">
-        <div class="flex items-center gap-4">
-            <button @click="sidebarOpen = !sidebarOpen" class="mobile-menu-btn text-cyber-text-muted hover:text-cyber-primary">
+    <header class="ad-topbar bg-white border-b border-gray-200 z-30 flex items-center justify-between px-5 shadow-sm">
+        <div class="flex items-center gap-3">
+            <button @click="sidebarOpen = !sidebarOpen" class="mobile-menu-btn text-gray-500 hover:text-gray-700">
                 <i class="fa fa-bars text-xl"></i>
             </button>
-            <h1 class="text-lg font-semibold text-cyber-text" x-text="pageTitle"></h1>
+            <div>
+                <h1 class="page-title" x-text="pageTitle">Dashboard</h1>
+                <p class="page-subtitle" x-show="currentPage === 'dashboard'">Server overview and performance metrics</p>
+            </div>
         </div>
         <div class="flex items-center gap-3">
-            <span class="hidden sm:block w-px h-5 bg-cyber-border"></span>
-            <div class="flex items-center gap-2 px-3 py-1 bg-cyber-border rounded-full text-xs text-cyber-text-muted">
-                <span class="w-2 h-2 rounded-full bg-cyber-accent animate-pulse"></span>
-                <span>System Online</span>
-            </div>
-            <button class="text-cyber-text-muted hover:text-cyber-primary transition-colors">
+            <button class="text-gray-500 hover:text-gray-700 transition-colors relative">
                 <i class="fa fa-bell text-xl"></i>
+                <span x-show="false" class="absolute top-0 right-0 w-2 h-2 bg-red-500 rounded-full"></span>
             </button>
+            <div class="flex items-center gap-2 px-3 py-1 bg-gray-100 rounded-full text-xs text-gray-500 border border-gray-200">
+                <span class="w-2 h-2 rounded-full bg-green-500 animate-pulse"></span>
+                <span class="font-medium text-gray-700">Online</span>
+            </div>
         </div>
     </header>
 
     <!-- Main Content -->
-    <main class="main-content pt-64 pb-8">
-        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+    <main class="ad-main pt-20 pb-10">
+        <div class="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8">
 
             <!-- Alert -->
             <div x-show="alert" x-transition class="alert" :class="`alert-${alertType}`" x-text="alert"></div>
@@ -287,85 +185,85 @@ pub fn panel_html() -> String {
             <div x-show="currentPage === 'dashboard'" class="space-y-6">
                 <div class="flex justify-between items-end">
                     <div>
-                        <h2 class="text-2xl font-bold text-cyber-text">Dashboard</h2>
-                        <p class="text-cyber-text-muted">Server overview and performance metrics</p>
+                        <h2 class="text-2xl font-bold text-gray-900">Dashboard</h2>
+                        <p class="text-gray-500">Server overview and performance metrics</p>
                     </div>
-                    <button @click="fetchStats()" class="btn-ghost text-sm">
+                    <button @click="fetchStats()" class="btn-default text-sm">
                         <i class="fa fa-refresh mr-2"></i> Refresh
                     </button>
                 </div>
 
                 <!-- Stats -->
                 <div class="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-6 gap-4">
-                    <div class="stat-card">
-                        <div class="text-cyber-text-muted text-sm font-semibold uppercase tracking-wider mb-1">Total Websites</div>
-                        <div class="text-2xl font-bold text-cyber-primary" x-text="stats.total_websites">0</div>
+                    <div class="bg-white border border-gray-200 rounded-lg p-6 shadow-sm">
+                        <div class="stat-card-label">Total Websites</div>
+                        <div class="stat-card-value text-blue-600" x-text="stats.total_websites">0</div>
                     </div>
-                    <div class="stat-card">
-                        <div class="text-cyber-text-muted text-sm font-semibold uppercase tracking-wider mb-1">Active Websites</div>
-                        <div class="text-2xl font-bold text-cyber-accent" x-text="stats.active_websites">0</div>
+                    <div class="bg-white border border-gray-200 rounded-lg p-6 shadow-sm">
+                        <div class="stat-card-label">Active Websites</div>
+                        <div class="stat-card-value text-green-600" x-text="stats.active_websites">0</div>
                     </div>
-                    <div class="stat-card">
-                        <div class="text-cyber-text-muted text-sm font-semibold uppercase tracking-wider mb-1">PHP Workers</div>
-                        <div class="text-2xl font-bold text-cyber-secondary" x-text="stats.total_workers">0</div>
+                    <div class="bg-white border border-gray-200 rounded-lg p-6 shadow-sm">
+                        <div class="stat-card-label">PHP Workers</div>
+                        <div class="stat-card-value text-indigo-600" x-text="stats.total_workers">0</div>
                     </div>
-                    <div class="stat-card">
-                        <div class="text-cyber-text-muted text-sm font-semibold uppercase tracking-wider mb-1">Running</div>
-                        <div class="text-2xl font-bold text-cyber-accent" x-text="stats.running_workers">0</div>
+                    <div class="bg-white border border-gray-200 rounded-lg p-6 shadow-sm">
+                        <div class="stat-card-label">Running</div>
+                        <div class="stat-card-value text-green-600" x-text="stats.running_workers">0</div>
                     </div>
-                    <div class="stat-card">
-                        <div class="text-cyber-text-muted text-sm font-semibold uppercase tracking-wider mb-1">SSL Certs</div>
-                        <div class="text-2xl font-bold text-cyber-primary" x-text="stats.ssl_certificates">0</div>
+                    <div class="bg-white border border-gray-200 rounded-lg p-6 shadow-sm">
+                        <div class="stat-card-label">SSL Certs</div>
+                        <div class="stat-card-value text-blue-600" x-text="stats.ssl_certificates">0</div>
                     </div>
-                    <div class="stat-card">
-                        <div class="text-cyber-text-muted text-sm font-semibold uppercase tracking-wider mb-1">Requests Today</div>
-                        <div class="text-2xl font-bold text-cyber-text" x-text="stats.requests_today">0</div>
+                    <div class="bg-white border border-gray-200 rounded-lg p-6 shadow-sm">
+                        <div class="stat-card-label">Requests Today</div>
+                        <div class="stat-card-value text-gray-900" x-text="stats.requests_today">0</div>
                     </div>
                 </div>
 
                 <!-- Resource Usage -->
                 <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
-                    <div class="cyber-card p-6">
-                        <h3 class="text-cyber-primary font-semibold mb-4">CPU Usage</h3>
+                    <div class="bg-white border border-gray-200 rounded-lg p-6 shadow-sm">
+                        <div class="ad-card-title flex items-center gap-2"><i class="fa fa-microchip text-blue-600"></i> CPU Usage</div>
                         <div class="flex items-center gap-3 mb-3">
-                            <span class="text-sm" x-text="Math.round(stats.cpu_usage) + '%'">0%</span>
-                            <span class="ml-auto text-xs text-cyber-text-muted font-mono" x-text="stats.cpu_usage.toFixed(1) + '%'">0.0%</span>
+                            <span class="text-sm font-medium" x-text="Math.round(stats.cpu_usage) + '%'">0%</span>
+                            <span class="ml-auto text-xs text-gray-500 font-mono" x-text="stats.cpu_usage.toFixed(1) + '%'">0.0%</span>
                         </div>
-                        <div class="progress-bar"><div class="progress-fill progress-fill-primary" :style="`width: ${stats.cpu_usage}%`"></div></div>
+                        <div class="progress-h"><div class="progress-fill bg-blue-600" :style="`width: ${stats.cpu_usage}%`"></div></div>
                     </div>
-                    <div class="cyber-card p-6">
-                        <h3 class="text-cyber-secondary font-semibold mb-4">Memory Usage</h3>
+                    <div class="bg-white border border-gray-200 rounded-lg p-6 shadow-sm">
+                        <div class="ad-card-title flex items-center gap-2"><i class="fa fa-memory text-indigo-600"></i> Memory Usage</div>
                         <div class="flex items-center gap-3 mb-3">
-                            <span class="text-sm" x-text="Math.round(stats.memory_usage) + '%'">0%</span>
-                            <span class="ml-auto text-xs text-cyber-text-muted font-mono" x-text="stats.memory_usage.toFixed(1) + '%'">0.0%</span>
+                            <span class="text-sm font-medium" x-text="Math.round(stats.memory_usage) + '%'">0%</span>
+                            <span class="ml-auto text-xs text-gray-500 font-mono" x-text="stats.memory_usage.toFixed(1) + '%'">0.0%</span>
                         </div>
-                        <div class="progress-bar"><div class="progress-fill progress-fill-secondary" :style="`width: ${stats.memory_usage}%`"></div></div>
+                        <div class="progress-h"><div class="progress-fill bg-indigo-600" :style="`width: ${stats.memory_usage}%`"></div></div>
                     </div>
-                    <div class="cyber-card p-6">
-                        <h3 class="text-cyber-accent font-semibold mb-4">Disk Usage</h3>
+                    <div class="bg-white border border-gray-200 rounded-lg p-6 shadow-sm">
+                        <div class="ad-card-title flex items-center gap-2"><i class="fa fa-hdd text-green-600"></i> Disk Usage</div>
                         <div class="flex items-center gap-3 mb-3">
-                            <span class="text-sm" x-text="Math.round(stats.disk_usage) + '%'">0%</span>
-                            <span class="ml-auto text-xs text-cyber-text-muted font-mono" x-text="stats.disk_usage.toFixed(1) + '%'">0.0%</span>
+                            <span class="text-sm font-medium" x-text="Math.round(stats.disk_usage) + '%'">0%</span>
+                            <span class="ml-auto text-xs text-gray-500 font-mono" x-text="stats.disk_usage.toFixed(1) + '%'">0.0%</span>
                         </div>
-                        <div class="progress-bar"><div class="progress-fill progress-fill-accent" :style="`width: ${stats.disk_usage}%`"></div></div>
+                        <div class="progress-h"><div class="progress-fill bg-green-600" :style="`width: ${stats.disk_usage}%`"></div></div>
                     </div>
                 </div>
 
                 <!-- Quick Actions -->
-                <div class="cyber-card p-6">
-                    <h3 class="text-cyber-text font-semibold text-lg mb-6">Quick Actions</h3>
-                    <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
-                        <button @click="currentPage='websites'; showAddWebsiteModal = true" class="btn-cyber py-4">
-                            <i class="fa fa-plus mr-2"></i> Add Website
+                <div class="bg-white border border-gray-200 rounded-lg p-6 shadow-sm">
+                    <h3 class="text-gray-900 font-semibold text-lg mb-6">Quick Actions</h3>
+                    <div class="grid grid-cols-1 md:grid-cols-4 gap-3">
+                        <button @click="currentPage='websites'; showAddWebsiteModal = true" class="btn-primary py-3 text-sm flex items-center justify-center gap-2">
+                            <i class="fa fa-plus"></i> Add Website
                         </button>
-                        <button @click="currentPage='ssl'; showAddSslModal = true" class="btn-cyber py-4">
-                            <i class="fa fa-lock mr-2"></i> Issue SSL
+                        <button @click="currentPage='ssl'; showAddSslModal = true" class="btn-primary py-3 text-sm flex items-center justify-center gap-2">
+                            <i class="fa fa-lock"></i> Issue SSL
                         </button>
-                        <button @click="fetchWorkers()" class="btn-cyber py-4">
-                            <i class="fa fa-sync mr-2"></i> Sync Workers
+                        <button @click="fetchWorkers()" class="btn-default py-3 text-sm flex items-center justify-center gap-2">
+                            <i class="fa fa-sync"></i> Sync Workers
                         </button>
-                        <button @click="showAddUserModal = true" class="btn-cyber py-4">
-                            <i class="fa fa-user-plus mr-2"></i> Add User
+                        <button @click="showAddUserModal = true" class="btn-default py-3 text-sm flex items-center justify-center gap-2">
+                            <i class="fa fa-user-plus"></i> Add User
                         </button>
                     </div>
                 </div>
@@ -375,47 +273,43 @@ pub fn panel_html() -> String {
             <div x-show="currentPage === 'websites'" class="space-y-6">
                 <div class="flex justify-between items-center">
                     <div>
-                        <h2 class="text-2xl font-bold text-cyber-text">Websites</h2>
-                        <p class="text-cyber-text-muted">Manage your PHP applications</p>
+                        <h2 class="text-2xl font-bold text-gray-900">Websites</h2>
+                        <p class="text-gray-500">Manage your PHP applications</p>
                     </div>
-                    <button @click="showAddWebsiteModal = true" class="btn-cyber">
+                    <button @click="showAddWebsiteModal = true" class="btn-primary">
                         <i class="fa fa-plus mr-2"></i> Add Website
                     </button>
                 </div>
 
-                <div class="cyber-card p-0 overflow-hidden">
+                <div class="bg-white border border-gray-200 rounded-lg overflow-hidden shadow-sm">
                     <div class="table-wrapper">
                         <table>
                             <thead>
                                 <tr>
-                                    <th>Domain</th>
+                                    <th class="w-1/4">Domain</th>
                                     <th>Document Root</th>
-                                    <th>PHP Version</th>
-                                    <th>SSL</th>
-                                    <th>Workers</th>
-                                    <th>Status</th>
-                                    <th>Actions</th>
+                                    <th class="w-1/6">PHP Version</th>
+                                    <th class="w-1/6">SSL</th>
+                                    <th class="w-1/6">Workers</th>
+                                    <th class="w-1/6">Status</th>
+                                    <th class="w-1/5">Actions</th>
                                 </tr>
                             </thead>
                             <tbody>
                                 <tr x-for="site in websites" :key="site.id">
-                                    <td class="font-mono text-sm" x-text="site.domain">example.com</td>
-                                    <td class="font-mono text-xs text-cyber-text-muted" x-text="site.document_root">/var/www/html</td>
+                                    <td class="font-mono text-sm text-gray-900" x-text="site.domain">example.com</td>
+                                    <td class="font-mono text-xs text-gray-500" x-text="site.document_root">/var/www/html</td>
                                     <td class="font-mono text-xs" x-text="site.php_version">8.3</td>
-                                    <td><span class="badge" :class="site.ssl_enabled ? 'badge-active' : 'badge-stopped'" x-text="site.ssl_enabled ? 'Active' : 'Inactive'">Active</span></td>
+                                    <td><span class="badge" :class="site.ssl_enabled ? 'badge-success' : 'badge-default'" x-text="site.ssl_enabled ? 'Active' : 'Inactive'">Active</span></td>
                                     <td class="font-mono text-sm" x-text="site.worker_count">1</td>
-                                    <td><span class="badge badge-active" x-text="site.is_active ? 'Online' : 'Offline'">Online</span></td>
+                                    <td><span class="badge badge-success" x-text="site.is_active ? 'Online' : 'Offline'">Online</span></td>
                                     <td class="flex gap-2">
-                                        <button @click="editWebsite(site)" class="btn-ghost text-xs py-1.5 px-3 text-cyber-primary hover:text-cyber-primary border-cyber-primary/30 hover:border-cyber-primary/50">
-                                            <i class="fa fa-edit"></i>
-                                        </button>
-                                        <button @click="deleteWebsite(site.id)" class="btn-ghost text-xs py-1.5 px-3 text-red-400 hover:text-red-400 border-red-400/30 hover:border-red-400/50">
-                                            <i class="fa fa-trash"></i>
-                                        </button>
+                                        <button @click="editWebsite(site)" class="btn-text text-sm"><i class="fa fa-edit"></i></button>
+                                        <button @click="deleteWebsite(site.id)" class="btn-text btn-danger-text text-sm"><i class="fa fa-trash"></i></button>
                                     </td>
                                 </tr>
                                 <tr x-show="websites.length === 0">
-                                    <td colspan="7" class="text-center py-8 text-cyber-text-muted">No websites yet. Add your first website.</td>
+                                    <td colspan="7" class="text-center py-12 text-gray-400">No websites yet. Add your first website.</td>
                                 </tr>
                             </tbody>
                         </table>
@@ -427,45 +321,41 @@ pub fn panel_html() -> String {
             <div x-show="currentPage === 'ssl'" class="space-y-6">
                 <div class="flex justify-between items-center">
                     <div>
-                        <h2 class="text-2xl font-bold text-cyber-text">SSL / TLS Certificates</h2>
-                        <p class="text-cyber-text-muted">Manage Let's Encrypt certificates via ACME</p>
+                        <h2 class="text-2xl font-bold text-gray-900">SSL / TLS Certificates</h2>
+                        <p class="text-gray-500">Manage Let's Encrypt certificates via ACME</p>
                     </div>
-                    <button @click="showAddSslModal = true" class="btn-cyber">
+                    <button @click="showAddSslModal = true" class="btn-primary">
                         <i class="fa fa-plus mr-2"></i> Issue Certificate
                     </button>
                 </div>
 
-                <div class="cyber-card p-0 overflow-hidden">
+                <div class="bg-white border border-gray-200 rounded-lg overflow-hidden shadow-sm">
                     <div class="table-wrapper">
                         <table>
                             <thead>
                                 <tr>
-                                    <th>Domain</th>
-                                    <th>Issuer</th>
-                                    <th>Expires</th>
-                                    <th>Auto Renew</th>
-                                    <th>Status</th>
-                                    <th>Actions</th>
+                                    <th class="w-1/4">Domain</th>
+                                    <th class="w-1/5">Issuer</th>
+                                    <th class="w-1/5">Expires</th>
+                                    <th class="w-1/6">Auto Renew</th>
+                                    <th class="w-1/6">Status</th>
+                                    <th class="w-1/5">Actions</th>
                                 </tr>
                             </thead>
                             <tbody>
                                 <tr x-for="cert in sslCerts" :key="cert.id">
-                                    <td class="font-mono text-sm" x-text="cert.domain">example.com</td>
-                                    <td class="font-mono text-xs text-cyber-text-muted" x-text="cert.issuer">letsencrypt</td>
+                                    <td class="font-mono text-sm text-gray-900" x-text="cert.domain">example.com</td>
+                                    <td class="font-mono text-xs text-gray-500" x-text="cert.issuer">letsencrypt</td>
                                     <td class="font-mono text-xs" x-text="cert.expires_at">--</td>
-                                    <td><span class="badge" :class="cert.auto_renew ? 'badge-active' : 'badge-stopped'" x-text="cert.auto_renew ? 'On' : 'Off'">On</span></td>
-                                    <td><span class="badge badge-active">Valid</span></td>
+                                    <td><span class="badge" :class="cert.auto_renew ? 'badge-success' : 'badge-default'" x-text="cert.auto_renew ? 'On' : 'Off'">On</span></td>
+                                    <td><span class="badge badge-success">Valid</span></td>
                                     <td class="flex gap-2">
-                                        <button @click="renewCert(cert.id)" class="btn-ghost text-xs py-1.5 px-3 text-cyber-accent hover:text-cyber-accent border-cyber-accent/30 hover:border-cyber-accent/50">
-                                            <i class="fa fa-sync-alt"></i>
-                                        </button>
-                                        <button @click="deleteCert(cert.id)" class="btn-ghost text-xs py-1.5 px-3 text-red-400 hover:text-red-400 border-red-400/30 hover:border-red-400/50">
-                                            <i class="fa fa-trash"></i>
-                                        </button>
+                                        <button @click="renewCert(cert.id)" class="btn-text text-sm"><i class="fa fa-sync-alt"></i></button>
+                                        <button @click="deleteCert(cert.id)" class="btn-text btn-danger-text text-sm"><i class="fa fa-trash"></i></button>
                                     </td>
                                 </tr>
                                 <tr x-show="sslCerts.length === 0">
-                                    <td colspan="6" class="text-center py-8 text-cyber-text-muted">No SSL certificates yet.</td>
+                                    <td colspan="6" class="text-center py-12 text-gray-400">No SSL certificates yet.</td>
                                 </tr>
                             </tbody>
                         </table>
@@ -477,41 +367,37 @@ pub fn panel_html() -> String {
             <div x-show="currentPage === 'workers'" class="space-y-6">
                 <div class="flex justify-between items-center">
                     <div>
-                        <h2 class="text-2xl font-bold text-cyber-text">PHP Workers</h2>
-                        <p class="text-cyber-text-muted">Manage embedded PHP worker processes</p>
+                        <h2 class="text-2xl font-bold text-gray-900">PHP Workers</h2>
+                        <p class="text-gray-500">Manage embedded PHP worker processes</p>
                     </div>
-                    <button @click="fetchWorkers()" class="btn-cyber">
+                    <button @click="fetchWorkers()" class="btn-primary">
                         <i class="fa fa-sync mr-2"></i> Refresh
                     </button>
                 </div>
 
-                <div class="cyber-card p-0 overflow-hidden">
+                <div class="bg-white border border-gray-200 rounded-lg overflow-hidden shadow-sm">
                     <div class="table-wrapper">
                         <table>
                             <thead>
                                 <tr>
                                     <th>Name</th>
-                                    <th>PID</th>
-                                    <th>Status</th>
-                                    <th>Requests</th>
-                                    <th>Uptime</th>
-                                    <th>Actions</th>
+                                    <th class="w-1/6">PID</th>
+                                    <th class="w-1/6">Status</th>
+                                    <th class="w-1/6">Requests</th>
+                                    <th class="w-1/5">Uptime</th>
+                                    <th class="w-1/5">Actions</th>
                                 </tr>
                             </thead>
                             <tbody>
                                 <tr x-for="worker in workers" :key="worker.id">
-                                    <td class="font-mono text-sm" x-text="worker.name">worker-1</td>
-                                    <td class="font-mono text-xs text-cyber-text-muted" x-text="worker.pid ?? '--'">--</td>
-                                    <td><span class="badge" :class="worker.status === 'running' ? 'badge-active' : 'badge-stopped'" x-text="worker.status">running</span></td>
+                                    <td class="font-mono text-sm text-gray-900" x-text="worker.name">worker-1</td>
+                                    <td class="font-mono text-xs text-gray-500" x-text="worker.pid ?? '--'">--</td>
+                                    <td><span class="badge" :class="worker.status === 'running' ? 'badge-success' : 'badge-default'" x-text="worker.status">running</span></td>
                                     <td class="font-mono text-sm" x-text="worker.requests">0</td>
-                                    <td class="font-mono text-xs text-cyber-text-muted" x-text="worker.uptime ?? '--'">--</td>
+                                    <td class="font-mono text-xs text-gray-500" x-text="worker.uptime ?? '--'">--</td>
                                     <td class="flex gap-2">
-                                        <button @click="restartWorker(worker.id)" class="btn-ghost text-xs py-1.5 px-3 text-cyber-primary hover:text-cyber-primary border-cyber-primary/30 hover:border-cyber-primary/50">
-                                            <i class="fa fa-redo"></i>
-                                        </button>
-                                        <button @click="stopWorker(worker.id)" class="btn-ghost text-xs py-1.5 px-3 text-red-400 hover:text-red-400 border-red-400/30 hover:border-red-400/50">
-                                            <i class="fa fa-stop"></i>
-                                        </button>
+                                        <button @click="restartWorker(worker.id)" class="btn-text text-sm"><i class="fa fa-redo"></i></button>
+                                        <button @click="stopWorker(worker.id)" class="btn-text btn-danger-text text-sm"><i class="fa fa-stop"></i></button>
                                     </td>
                                 </tr>
                             </tbody>
@@ -524,33 +410,35 @@ pub fn panel_html() -> String {
             <div x-show="currentPage === 'files'" class="space-y-6">
                 <div class="flex justify-between items-center">
                     <div>
-                        <h2 class="text-2xl font-bold text-cyber-text">File Manager</h2>
-                        <p class="text-cyber-text-muted">Browse and edit files on the server</p>
+                        <h2 class="text-2xl font-bold text-gray-900">File Manager</h2>
+                        <p class="text-gray-500">Browse and edit files on the server</p>
                     </div>
                 </div>
-                <div class="cyber-card p-6">
+
+                <div class="bg-white border border-gray-200 rounded-lg p-6 shadow-sm">
                     <div class="flex gap-2 mb-4">
-                        <input type="text" class="input-cyber flex-1" placeholder="Current directory" x-model="fileDir">
-                        <button @click="listFiles()" class="btn-ghost px-4">
+                        <input type="text" class="input-default flex-1" placeholder="Current directory" x-model="fileDir">
+                        <button @click="listFiles()" class="btn-default px-4">
                             <i class="fa fa-search"></i>
                         </button>
                     </div>
                     <div class="table-wrapper">
                         <table>
                             <thead>
-                                <tr><th>Name</th><th>Type</th><th>Size</th><th>Modified</th><th>Actions</th></tr>
+                                <tr><th class="w-1/3">Name</th><th class="w-1/6">Type</th><th class="w-1/6">Size</th><th class="w-1/4">Modified</th><th>Actions</th></tr>
                             </thead>
                             <tbody>
                                 <tr x-for="file in files" :key="file.name">
-                                    <td class="font-mono text-sm" x-text="file.name">index.php</td>
-                                    <td class="font-mono text-xs text-cyber-text-muted" x-text="file.type">file</td>
+                                    <td class="font-mono text-sm text-gray-900" x-text="file.name">index.php</td>
+                                    <td class="font-mono text-xs text-gray-500" x-text="file.type">file</td>
                                     <td class="font-mono text-xs" x-text="file.size">1.2 KB</td>
-                                    <td class="font-mono text-xs text-cyber-text-muted" x-text="file.modified">--</td>
+                                    <td class="font-mono text-xs text-gray-500" x-text="file.modified">--</td>
                                     <td class="flex gap-2">
-                                        <button @click="editFile(file.path)" class="btn-ghost text-xs py-1.5 px-3 text-cyber-primary hover:text-cyber-primary border-cyber-primary/30 hover:border-cyber-primary/50">
-                                            <i class="fa fa-edit"></i>
-                                        </button>
+                                        <button @click="editFile(file.path)" class="btn-text text-sm"><i class="fa fa-edit"></i></button>
                                     </td>
+                                </tr>
+                                <tr x-show="files.length === 0">
+                                    <td colspan="5" class="text-center py-12 text-gray-400">No files found.</td>
                                 </tr>
                             </tbody>
                         </table>
@@ -562,26 +450,29 @@ pub fn panel_html() -> String {
             <div x-show="currentPage === 'users'" class="space-y-6">
                 <div class="flex justify-between items-center">
                     <div>
-                        <h2 class="text-2xl font-bold text-cyber-text">Users</h2>
-                        <p class="text-cyber-text-muted">Manage panel administrators</p>
+                        <h2 class="text-2xl font-bold text-gray-900">Users</h2>
+                        <p class="text-gray-500">Manage panel administrators</p>
                     </div>
-                    <button @click="showAddUserModal = true" class="btn-cyber">
+                    <button @click="showAddUserModal = true" class="btn-primary">
                         <i class="fa fa-plus mr-2"></i> Add User
                     </button>
                 </div>
-                <div class="cyber-card p-0 overflow-hidden">
+                <div class="bg-white border border-gray-200 rounded-lg overflow-hidden shadow-sm">
                     <div class="table-wrapper">
                         <table>
                             <thead>
-                                <tr><th>Username</th><th>Role</th><th>Email</th><th>Status</th><th>Actions</th></tr>
+                                <tr><th class="w-1/4">Username</th><th class="w-1/5">Role</th><th class="w-1/4">Email</th><th class="w-1/5">Status</th><th>Actions</th></tr>
                             </thead>
                             <tbody>
                                 <tr x-for="user in users" :key="user.id">
-                                    <td class="font-mono text-sm" x-text="user.username">admin</td>
-                                    <td class="font-mono text-xs text-cyber-text-muted" x-text="user.role">admin</td>
-                                    <td class="font-mono text-xs text-cyber-text-muted" x-text="user.email ?? '—'">—</td>
-                                    <td><span class="badge badge-active" x-text="user.is_active ? 'Active' : 'Inactive'">Active</span></td>
+                                    <td class="font-mono text-sm text-gray-900" x-text="user.username">admin</td>
+                                    <td class="font-mono text-xs text-gray-500" x-text="user.role">admin</td>
+                                    <td class="font-mono text-xs text-gray-500" x-text="user.email ?? '—'">—</td>
+                                    <td><span class="badge badge-success" x-text="user.is_active ? 'Active' : 'Inactive'">Active</span></td>
                                     <td class="flex gap-2"></td>
+                                </tr>
+                                <tr x-show="users.length === 0">
+                                    <td colspan="5" class="text-center py-12 text-gray-400">No users found.</td>
                                 </tr>
                             </tbody>
                         </table>
@@ -591,17 +482,17 @@ pub fn panel_html() -> String {
 
             <!-- Settings -->
             <div x-show="currentPage === 'settings'" class="space-y-6">
-                <h2 class="text-2xl font-bold text-cyber-text">Settings</h2>
-                <div class="cyber-card p-6">
-                    <h3 class="text-cyber-text font-semibold text-lg mb-6">Server Configuration</h3>
+                <h2 class="text-2xl font-bold text-gray-900">Settings</h2>
+                <div class="bg-white border border-gray-200 rounded-lg p-6 shadow-sm">
+                    <h3 class="ad-card-title">Server Configuration</h3>
                     <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
                         <div class="form-group">
                             <label class="form-label">Listen Address</label>
-                            <input type="text" class="input-cyber" value="0.0.0.0:8000">
+                            <input type="text" class="input-default" value="0.0.0.0:8000">
                         </div>
                         <div class="form-group">
                             <label class="form-label">PHP Version</label>
-                            <select class="select-cyber">
+                            <select class="select-default">
                                 <option>PHP 8.3</option>
                                 <option>PHP 8.2</option>
                                 <option>PHP 8.1</option>
@@ -609,14 +500,14 @@ pub fn panel_html() -> String {
                         </div>
                         <div class="form-group">
                             <label class="form-label">Worker Count</label>
-                            <input type="number" class="input-cyber" value="4">
+                            <input type="number" class="input-default" value="4">
                         </div>
                         <div class="form-group">
                             <label class="form-label">Max Body Size</label>
-                            <input type="text" class="input-cyber" value="10 MB">
+                            <input type="text" class="input-default" value="10 MB">
                         </div>
                     </div>
-                    <button class="btn-cyber mt-6">Save Settings</button>
+                    <button class="btn-primary">Save Settings</button>
                 </div>
             </div>
 
@@ -625,42 +516,43 @@ pub fn panel_html() -> String {
 
     <!-- Add Website Modal -->
     <div x-show="showAddWebsiteModal" class="modal-overlay" x-transition @click="showAddWebsiteModal = false">
+        <button class="modal-close-btn" @click="showAddWebsiteModal = false">&times;</button>
         <div class="modal" @click.stop>
-            <h3 class="text-xl font-bold text-cyber-text mb-6">Add Website</h3>
+            <h3 class="text-xl font-bold text-gray-900 mb-6">Add Website</h3>
             <form @submit.prevent="addWebsite">
                 <div class="form-group">
                     <label class="form-label">Website Name</label>
-                    <input type="text" class="input-cyber" x-model="newWebsite.name" placeholder="My Website" required>
+                    <input type="text" class="input-default" x-model="newWebsite.name" placeholder="My Website" required>
                 </div>
                 <div class="form-group">
                     <label class="form-label">Domain</label>
-                    <input type="text" class="input-cyber" x-model="newWebsite.domain" placeholder="example.com" required>
+                    <input type="text" class="input-default" x-model="newWebsite.domain" placeholder="example.com" required>
                 </div>
                 <div class="form-group">
                     <label class="form-label">Document Root</label>
-                    <input type="text" class="input-cyber" x-model="newWebsite.document_root" placeholder="/var/www/example.com" required>
+                    <input type="text" class="input-default" x-model="newWebsite.document_root" placeholder="/var/www/example.com" required>
                 </div>
                 <div class="form-group">
                     <label class="form-label">PHP Version</label>
-                    <select class="select-cyber" x-model="newWebsite.php_version">
+                    <select class="select-default" x-model="newWebsite.php_version">
                         <option>8.3</option><option>8.2</option><option>8.1</option>
                     </select>
                 </div>
                 <div class="form-group">
                     <label class="form-label">Worker Count</label>
-                    <input type="number" class="input-cyber" x-model="newWebsite.worker_count" value="1" min="1">
+                    <input type="number" class="input-default" x-model="newWebsite.worker_count" value="1" min="1">
                 </div>
                 <div class="form-group flex items-center gap-2">
-                    <input type="checkbox" class="rounded text-cyber-primary focus:ring-cyber-primary" x-model="newWebsite.ssl_enabled">
-                    <label class="text-cyber-text-muted text-sm">Enable SSL (Let's Encrypt)</label>
+                    <input type="checkbox" class="w-4 h-4 border-gray-300 rounded text-blue-600 focus:ring-blue-500" x-model="newWebsite.ssl_enabled">
+                    <label class="text-gray-600 text-sm cursor-pointer">Enable SSL (Let's Encrypt)</label>
                 </div>
                 <div class="form-group" x-show="newWebsite.ssl_enabled">
                     <label class="form-label">ACME Email</label>
-                    <input type="email" class="input-cyber" x-model="newWebsite.acme_email" placeholder="admin@example.com">
+                    <input type="email" class="input-default" x-model="newWebsite.acme_email" placeholder="admin@example.com">
                 </div>
                 <div class="flex justify-end gap-3 pt-4">
-                    <button type="button" @click="showAddWebsiteModal = false" class="btn-ghost px-4">Cancel</button>
-                    <button type="submit" class="btn-cyber px-6">Add Website</button>
+                    <button type="button" @click="showAddWebsiteModal = false" class="btn-default px-4">Cancel</button>
+                    <button type="submit" class="btn-primary px-6">Add Website</button>
                 </div>
             </form>
         </div>
@@ -668,21 +560,22 @@ pub fn panel_html() -> String {
 
     <!-- Add SSL Modal -->
     <div x-show="showAddSslModal" class="modal-overlay" x-transition @click="showAddSslModal = false">
+        <button class="modal-close-btn" @click="showAddSslModal = false">&times;</button>
         <div class="modal" @click.stop>
-            <h3 class="text-xl font-bold text-cyber-text mb-6">Issue SSL Certificate</h3>
+            <h3 class="text-xl font-bold text-gray-900 mb-6">Issue SSL Certificate</h3>
             <form @submit.prevent="issueSsl">
                 <div class="form-group">
                     <label class="form-label">Email</label>
-                    <input type="email" class="input-cyber" x-model="sslForm.email" placeholder="admin@example.com" required>
+                    <input type="email" class="input-default" x-model="sslForm.email" placeholder="admin@example.com" required>
                 </div>
                 <div class="form-group">
                     <label class="form-label">Domains (comma separated)</label>
-                    <input type="text" class="input-cyber" x-model="sslForm.domains" placeholder="example.com, www.example.com" required>
+                    <input type="text" class="input-default" x-model="sslForm.domains" placeholder="example.com, www.example.com" required>
                 </div>
-                <div class="text-xs text-cyber-text-muted mt-2">Uses HTTP-01 challenge. Port 80 must be publicly accessible.</div>
+                <div class="text-xs text-gray-500 mt-2">Uses HTTP-01 challenge. Port 80 must be publicly accessible.</div>
                 <div class="flex justify-end gap-3 pt-4">
-                    <button type="button" @click="showAddSslModal = false" class="btn-ghost px-4">Cancel</button>
-                    <button type="submit" class="btn-cyber px-6">Issue Certificate</button>
+                    <button type="button" @click="showAddSslModal = false" class="btn-default px-4">Cancel</button>
+                    <button type="submit" class="btn-primary px-6">Issue Certificate</button>
                 </div>
             </form>
         </div>
@@ -690,59 +583,37 @@ pub fn panel_html() -> String {
 
     <!-- Add User Modal -->
     <div x-show="showAddUserModal" class="modal-overlay" x-transition @click="showAddUserModal = false">
+        <button class="modal-close-btn" @click="showAddUserModal = false">&times;</button>
         <div class="modal" @click.stop>
-            <h3 class="text-xl font-bold text-cyber-text mb-6">Add User</h3>
+            <h3 class="text-xl font-bold text-gray-900 mb-6">Add User</h3>
             <form @submit.prevent="addUser">
                 <div class="form-group">
                     <label class="form-label">Username</label>
-                    <input type="text" class="input-cyber" x-model="newUser.username" required>
+                    <input type="text" class="input-default" x-model="newUser.username" required>
                 </div>
                 <div class="form-group">
                     <label class="form-label">Password</label>
-                    <input type="password" class="input-cyber" x-model="newUser.password" required>
+                    <input type="password" class="input-default" x-model="newUser.password" required>
                 </div>
                 <div class="form-group">
                     <label class="form-label">Role</label>
-                    <select class="select-cyber" x-model="newUser.role">
+                    <select class="select-default" x-model="newUser.role">
                         <option>admin</option><option>viewer</option>
                     </select>
                 </div>
                 <div class="form-group">
                     <label class="form-label">Email</label>
-                    <input type="email" class="input-cyber" x-model="newUser.email" placeholder="user@example.com">
+                    <input type="email" class="input-default" x-model="newUser.email" placeholder="user@example.com">
                 </div>
                 <div class="flex justify-end gap-3 pt-4">
-                    <button type="button" @click="showAddUserModal = false" class="btn-ghost px-4">Cancel</button>
-                    <button type="submit" class="btn-cyber px-6">Add User</button>
+                    <button type="button" @click="showAddUserModal = false" class="btn-default px-4">Cancel</button>
+                    <button type="submit" class="btn-primary px-6">Add User</button>
                 </div>
             </form>
         </div>
     </div>
 
     <script>
-        // Alpine.js data
-        function init() {
-            return {
-                currentPage: 'dashboard',
-                sidebarOpen: false,
-                alert: null,
-                alertType: 'info',
-                stats: { total_websites: 0, active_websites: 0, total_workers: 0, running_workers: 0, ssl_certificates: 0, requests_today: 0, cpu_usage: 0, memory_usage: 0, disk_usage: 0 },
-                websites: [],
-                sslCerts: [],
-                workers: [],
-                files: [],
-                fileDir: '/',
-                showAddWebsiteModal: false,
-                showAddSslModal: false,
-                showAddUserModal: false,
-                newWebsite: { name: '', domain: '', document_root: '', php_version: '8.3', ssl_enabled: false, acme_email: '', acme_domains: '', worker_count: 1 },
-                sslForm: { email: '', domains: '' },
-                newUser: { username: '', password: '', role: 'admin', email: '' },
-                pageTitle: 'Dashboard',
-            };
-        }
-
         // Page titles
         const titles = {
             dashboard: 'Dashboard',
@@ -753,11 +624,6 @@ pub fn panel_html() -> String {
             users: 'Users',
             settings: 'Settings'
         };
-
-        // Initialize Alpine
-        document.addEventListener('alpine:init', () => {
-            Alpine.data('app', init);
-        });
 
         // Global helpers
         async function api(path, method = 'GET', body = null) {
@@ -770,8 +636,6 @@ pub fn panel_html() -> String {
         }
 
         function showAlert(msg, type = 'info') {
-            const app = Alpine.store('app') || document.querySelector('[x-data]');
-            // Use direct Alpine reference
             const component = document.querySelector('[x-data]');
             if (component && component.__x) {
                 component.__x.alert = msg;
@@ -918,18 +782,13 @@ pub fn panel_html() -> String {
         }
 
         // Watch currentPage changes to update title
-        const observerTarget = document.querySelector('[x-data]');
-        if (observerTarget) {
-            const origInit = observerTarget.__x?.init;
-            // Simple polling fallback for title update
-            setInterval(() => {
-                const comp = document.querySelector('[x-data]');
-                if (comp && comp.__x && comp.__x.currentPage && titles[comp.__x.currentPage]) {
-                    const h1 = document.querySelector('main h1');
-                    if (h1) h1.textContent = titles[comp.__x.currentPage];
-                }
-            }, 100);
-        }
+        setInterval(() => {
+            const comp = document.querySelector('[x-data]');
+            if (comp && comp.__x && comp.__x.currentPage && titles[comp.__x.currentPage]) {
+                const h1 = document.querySelector('main h1');
+                if (h1) h1.textContent = titles[comp.__x.currentPage];
+            }
+        }, 100);
 
         // Initial data load
         setTimeout(() => { fetchWebsites(); fetchSsl(); fetchWorkers(); }, 500);
