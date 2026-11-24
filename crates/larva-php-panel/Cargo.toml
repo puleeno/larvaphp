@@ -1,0 +1,23 @@
+[package]
+name = "larva-php-panel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "LarvaPHP v2 Web Control Panel - CyberPanel/OpenLiteSpeed style GUI"
+
+[dependencies]
+tokio = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+axum = "0.8"
+tower-http = { version = "0.6", features = ["trace", "cors"] }
+rusqlite = { version = "0.33", features = ["bundled"] }
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+
+[features]
+default = []

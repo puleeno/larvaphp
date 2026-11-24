@@ -5,6 +5,7 @@ members = [
     "crates/larva-php-sys",
     "crates/larva-php-caddy",
     "crates/larva-php-extgen",
+    "crates/larva-php-panel",
 ]
 
 [workspace.package]
@@ -19,6 +20,7 @@ larva-php = { path = "crates/larva-php" }
 larva-php-sys = { path = "crates/larva-php-sys" }
 larva-php-caddy = { path = "crates/larva-php-caddy" }
 larva-php-extgen = { path = "crates/larva-php-extgen" }
+larva-php-panel = { path = "crates/larva-php-panel" }
 
 tokio = { version = "1", features = ["full"] }
 hyper = { version = "1", features = ["full"] }
@@ -45,3 +47,8 @@ walkdir = "2"
 glob = "0.3"
 memmap2 = "0.9"
 num_cpus = "1"
+axum = "0.8"
+tower-http = { version = "0.6", features = ["trace", "cors"] }
+rusqlite = { version = "0.33", features = ["bundled"] }
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }

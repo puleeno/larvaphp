@@ -89,6 +89,11 @@ struct Args {
     #[arg(long = "acme-renew-days", value_name = "DAYS", default_value = "30")]
     acme_renew_days: u32,
 
+    /// Enable the built-in web control panel (CyberPanel/OpenLiteSpeed style).
+    /// Requires --features panel. Accessible at http://<addr>:<panel-port>.
+    #[arg(long = "panel", value_name = "PORT")]
+    panel: Option<String>,
+
     /// Show version information
     #[arg(short = 'v', long = "version")]
     version: bool,
@@ -511,6 +516,29 @@ fn main() -> ExitCode {
                 "--lets-encrypt requires building with --features http3,acme"
             );
             return ExitCode::from(1);
+        }
+
+        // Start the web control panel if --panel is specified.
+        // Runs on a separate TCP port (default 9000).
+        if let Some(panel_port) = &args.panel {
+            #[cfg(feature = "panel")]
+            {
+                let port = panel_port.parse::<u16>().unwrap_or(9000);
+                let panel_addr = format!("0.0.0.0:{}", port);
+                tracing::info!("Starting web control panel on http://{}", panel_addr);
+                tokio::spawn(async move {
+                    if let Err(e) = larva_php::panel::start(&panel_addr).await {
+                        tracing::error!("Panel server error: {}", e);
+                    }
+                });
+                // Give the panel a moment to bind.
+                std::thread::sleep(std::time::Duration::from_millis(500));
+            }
+            #[cfg(not(feature = "panel"))]
+            {
+                eprintln!("--panel requires building with --features panel");
+                return ExitCode::from(1);
+            }
         }
 
         // Start HTTP server

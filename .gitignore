@@ -9,3 +9,6 @@ CACHEDIR.TAG
 
 # Logs
 *.log
+
+# Panel database
+larva-panel.db

@@ -48,6 +48,9 @@ pub mod worker;
 #[cfg(feature = "acme")]
 pub mod acme;
 
+#[cfg(feature = "panel")]
+pub use larva_php_panel as panel;
+
 #[cfg(feature = "mercure")]
 pub mod mercure;
 
