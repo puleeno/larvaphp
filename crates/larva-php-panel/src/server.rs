@@ -41,16 +41,16 @@ impl PanelState {
             .route("/api/stats", get(stats_handler))
             .route("/api/websites", get(list_websites).post(create_website))
             .route(
-                "/api/websites/:id",
+                "/api/websites/{id}",
                 get(get_website).put(update_website).delete(delete_website),
             )
             .route("/api/ssl", get(list_ssl))
             .route("/api/ssl/issue", post(issue_ssl))
-            .route("/api/ssl/:id", delete(delete_ssl_cert))
-            .route("/api/ssl/:id/renew", post(renew_ssl_cert))
+            .route("/api/ssl/{id}", delete(delete_ssl_cert))
+            .route("/api/ssl/{id}/renew", post(renew_ssl_cert))
             .route("/api/workers", get(list_workers))
-            .route("/api/workers/:id/restart", post(restart_worker))
-            .route("/api/workers/:id/stop", post(stop_worker))
+            .route("/api/workers/{id}/restart", post(restart_worker))
+            .route("/api/workers/{id}/stop", post(stop_worker))
             .route("/api/users", get(list_users).post(create_user))
             .route("/api/files", get(list_files))
             .route("/api/settings", get(list_settings).put(update_setting))
