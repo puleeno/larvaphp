@@ -91,6 +91,10 @@ pub struct Server {
     pub max_body_size: u64,
     /// PHP configuration overrides (`php_ini` / `-d` directives).
     pub php_ini: HashMap<String, String>,
+    #[cfg(feature = "acme")]
+    /// Directory where HTTP-01 challenge tokens are written, served at
+    /// `/.well-known/acme-challenge/<token>`.
+    pub acme_challenge_dir: Option<PathBuf>,
 }
 
 /// Cached file metadata (nginx open_file_cache equivalent).
@@ -199,6 +203,8 @@ impl Server {
             rate_limiter: RateLimiter::new(RateLimitConfig::default()),
             max_body_size: 10 * 1024 * 1024, // 10 MB
             php_ini: HashMap::new(),
+            #[cfg(feature = "acme")]
+            acme_challenge_dir: None,
         })
     }
 
@@ -220,12 +226,21 @@ impl Server {
             rate_limiter: RateLimiter::new(RateLimitConfig::default()),
             max_body_size: 10 * 1024 * 1024, // 10 MB
             php_ini: HashMap::new(),
+            #[cfg(feature = "acme")]
+            acme_challenge_dir: None,
         }
     }
 
     /// Set PHP configuration overrides (applied as `-d key=value` to php-cgi).
     pub fn set_php_ini(&mut self, ini: HashMap<String, String>) {
         self.php_ini = ini;
+    }
+
+    #[cfg(feature = "acme")]
+    /// Set the directory where HTTP-01 challenge tokens are written. The
+    /// server serves these at `/.well-known/acme-challenge/<token>`.
+    pub fn set_acme_challenge_dir(&mut self, dir: PathBuf) {
+        self.acme_challenge_dir = Some(dir);
     }
 
     /// Find a worker whose request matcher matches the given request.
@@ -378,6 +393,31 @@ impl Server {
                 .header("server", "LarvaPHP")
                 .body(Full::new(Bytes::from(default.to_vec())))
                 .unwrap());
+        }
+
+        // ACME HTTP-01 challenge: serve token files from the challenge dir.
+        #[cfg(feature = "acme")]
+        if let Some(challenge_dir) = &self.acme_challenge_dir {
+            if uri_path.starts_with("/.well-known/acme-challenge/") {
+                let token = uri_path.trim_start_matches("/.well-known/acme-challenge/");
+                if !token.is_empty() && !token.contains('/') && !token.contains('\\') {
+                    let file_path = challenge_dir.join(token);
+                    if let Ok(content) = tokio::fs::read(&file_path).await {
+                        return Ok(Response::builder()
+                            .status(StatusCode::OK)
+                            .header("content-type", "application/octet-stream")
+                            .header("content-length", content.len().to_string())
+                            .header("server", "LarvaPHP")
+                            .body(Full::new(Bytes::from(content)))
+                            .unwrap());
+                    }
+                }
+                return Ok(Response::builder()
+                    .status(StatusCode::NOT_FOUND)
+                    .header("server", "LarvaPHP")
+                    .body(Full::new(Bytes::from("Not Found")))
+                    .unwrap());
+            }
         }
 
         // Determine the script filename

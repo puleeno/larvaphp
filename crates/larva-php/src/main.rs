@@ -437,6 +437,11 @@ fn main() -> ExitCode {
 
                 #[cfg(feature = "acme")]
                 {
+                    server.set_acme_challenge_dir(challenge_dir.clone());
+                }
+
+                #[cfg(feature = "acme")]
+                {
                     // ACME uses async reqwest; `main` is synchronous, so drive
                     // the future on a short-lived runtime before the server's
                     // own runtime is created below.
