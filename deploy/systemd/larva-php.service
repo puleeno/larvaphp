@@ -1,0 +1,40 @@
+[Unit]
+Description=LarvaPHP Application Server (embedded PHP, HTTP/3)
+Documentation=https://github.com/puleeno/larvaphp/tree/v1/docs/build-release-linux.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+EnvironmentFile=/etc/larva-php/larva-php.env
+ExecStart=/usr/local/bin/larva-php \
+    --root ${LARVA_ROOT} \
+    --addr ${LARVA_ADDR} \
+    --workers ${LARVA_WORKERS} \
+    --embedded \
+    --http3 \
+    --cert ${LARVA_CERT} \
+    --key ${LARVA_KEY}
+Restart=on-failure
+RestartSec=2s
+KillMode=mixed
+TimeoutStopSec=15s
+
+# Hardening (safe for apps under /var/www or /srv).
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LimitNOFILE=65536
+
+# Allows binding port 80/443 directly when LARVA_ADDR uses a privileged port.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+
+[Install]
+WantedBy=multi-user.target

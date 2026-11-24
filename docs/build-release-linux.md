@@ -202,3 +202,11 @@ grep -rn unix_stubs . --exclude-dir=.git --exclude-dir=target
 | `lock file version 4 was found` | Upgrade Rust to a current stable toolchain. |
 | `undefined symbol: __ubsan_handle_*` | Ensure ACME uses `rustls-no-provider` + `ring`, not the default `aws-lc-rs`. |
 | Embedded script returns status `0` | Rebuild with the current shim; status lines like `HTTP/1.0 0 X` are normalised to `200`. |
+
+---
+
+## 9. Next step: run as a service
+
+See [`linux-daemon-service.md`](linux-daemon-service.md) for systemd units that
+run the all-feature release as a daemon, including an env template and
+multi-site (`larva-php@.service`) setup.
