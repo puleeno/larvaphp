@@ -25,6 +25,7 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use dashmap::DashMap;
 
 use crate::context::{PhpContext, RequestOption};
+use crate::edge_cache::{CachedPage, EdgeCache};
 use crate::env::PreparedEnv;
 use crate::errors::{Error, Result};
 use crate::worker::Worker;
@@ -153,6 +154,8 @@ pub struct Server {
     pub max_body_size: u64,
     /// PHP configuration overrides (`php_ini` / `-d` directives).
     pub php_ini: HashMap<String, String>,
+    /// Read-only edge cache for pre-rendered CMS pages (Jankx page cache).
+    pub edge_cache: Arc<EdgeCache>,
 }
 
 /// Cached file metadata (nginx open_file_cache equivalent).
@@ -314,7 +317,7 @@ impl Server {
             idx: -1,
             configured_name: String::new(),
             name: String::new(),
-            root: abs_root,
+            root: abs_root.clone(),
             split_path: vec![".php".to_string()],
             env: HashMap::new(),
             workers: RwLock::new(Vec::new()),
@@ -326,6 +329,7 @@ impl Server {
             rate_limiter: RateLimiter::new(RateLimitConfig::default()),
             max_body_size: 10 * 1024 * 1024, // 10 MB
             php_ini: HashMap::new(),
+            edge_cache: Arc::new(EdgeCache::new(&abs_root)),
         })
     }
 
@@ -347,6 +351,7 @@ impl Server {
             rate_limiter: RateLimiter::new(RateLimitConfig::default()),
             max_body_size: 10 * 1024 * 1024, // 10 MB
             php_ini: HashMap::new(),
+            edge_cache: Arc::new(EdgeCache::new("")),
         }
     }
 
@@ -569,6 +574,13 @@ impl Server {
                 .unwrap());
         }
 
+        // Serve a pre-rendered CMS page without starting PHP at all.
+        let accepts_gzip = header_value(req.headers(), "accept-encoding")
+            .is_some_and(|v| v.to_ascii_lowercase().contains("gzip"));
+        if let Some(page) = self.edge_cache.lookup(&ctx) {
+            return Ok(edge_cache_response(&page, ctx.request_method.as_str(), accepts_gzip));
+        }
+
         // Read request body (drain the stream so hyper doesn't hang)
         let mut body_bytes = Vec::new();
         let mut body = req.into_body();
@@ -702,8 +714,24 @@ impl Server {
         let req = builder
             .body(Full::new(Bytes::from(body.to_vec())))
             .map_err(|e| Error::Ffi(e.to_string()))?;
-        let ctx = PhpContext::from_request(&req, Arc::new(Server::fallback()), vec![])?;
+        let mut ctx = PhpContext::from_request(&req, Arc::new(Server::fallback()), vec![])?;
         ctx.validate()?;
+        // HTTP/3 always terminates TLS; make the cache key and WordPress see it.
+        ctx.https = "on".to_string();
+
+        if let Some(page) = self.edge_cache.lookup(&ctx) {
+            return Ok((
+                StatusCode::from_u16(page.status).unwrap_or(StatusCode::OK),
+                vec![
+                    ("server".to_string(), "LarvaPHP".to_string()),
+                    ("cache-control".to_string(), "no-cache".to_string()),
+                    ("x-larva-edge-cache".to_string(), "HIT".to_string()),
+                    ("content-type".to_string(), page.content_type.clone()),
+                    ("content-length".to_string(), page.html.len().to_string()),
+                ],
+                page.html,
+            ));
+        }
 
         let body = Bytes::from(body.to_vec());
         let output = execute_php_cgi(&script_path, &ctx, &body, &self.php_ini)?;
@@ -885,6 +913,7 @@ impl Server {
         let server_workers: Arc<Vec<Arc<Worker>>> =
             Arc::new(self.workers_with_request_matcher.read().unwrap().clone());
         let server_php_ini: Arc<HashMap<String, String>> = Arc::new(self.php_ini.clone());
+        let server_edge_cache = self.edge_cache.clone();
 
         loop {
             // Accept from either the IPv4 or IPv6 listener (whichever fires).
@@ -926,6 +955,7 @@ impl Server {
             let max_body_size = self.max_body_size;
             let workers = server_workers.clone();
             let php_ini = server_php_ini.clone();
+            let edge_cache = server_edge_cache.clone();
 
             tokio::spawn(async move {
                 let io = TokioIo::new(stream);
@@ -940,6 +970,7 @@ impl Server {
                             let max_body_size = max_body_size;
                             let workers = workers.clone();
                             let php_ini = php_ini.clone();
+                            let edge_cache = edge_cache.clone();
                             let client_ip = peer_addr.ip().to_string();
                             async move {
                                 if !registered {
@@ -1270,6 +1301,18 @@ impl Server {
                                     handler_return: None,
                                 };
 
+                                // Edge cache hit: return pre-rendered HTML without
+                                // booting PHP at all (the CMS wrote this entry).
+                                let accepts_gzip = header_value(req.headers(), "accept-encoding")
+                                    .is_some_and(|v| v.to_ascii_lowercase().contains("gzip"));
+                                if let Some(page) = edge_cache.lookup(&ctx) {
+                                    return Ok(edge_cache_response(
+                                        &page,
+                                        ctx.request_method.as_str(),
+                                        accepts_gzip,
+                                    ));
+                                }
+
                                 // Read request body (drain the stream so hyper doesn't hang)
                                 let mut body_bytes = Vec::new();
                                 let mut body = req.into_body();
@@ -1592,6 +1635,9 @@ params.push(("HTTP_HOST".into(), http_host.clone()));
         }
         // HTTP_HOST so the worker's php-cgi resolves the correct host.
         req_headers.push(("HTTP_HOST".to_string(), http_host.clone()));
+        // WordPress' is_ssl() checks $_SERVER['HTTPS']; without this every
+        // permalink generated inside a worker would use http://.
+        req_headers.push(("HTTPS".to_string(), ctx.https.clone()));
         // Forward Cookie as HTTP_COOKIE so PHP ($_COOKIE) and WordPress see it.
         if let Some(cookie) = ctx
             .env
@@ -2174,6 +2220,69 @@ fn cached_gzip(path: &str, mtime: u64, size: u64) -> Result<Bytes> {
         },
     );
     Ok(body)
+}
+
+/// Gzip an in-memory response (used by the edge cache) with the same bounded
+/// cache as static files.
+fn cached_gzip_bytes(key: &str, data: &[u8]) -> Result<Bytes> {
+    let cache = gzip_cache();
+    if let Some(entry) = cache.get(key) {
+        if entry.size == data.len() as u64 {
+            return Ok(entry.body.clone());
+        }
+    }
+
+    let body = gzip_bytes(data)?;
+    if cache.len() >= GZIP_CACHE_MAX_ENTRIES {
+        cache.clear();
+    }
+    cache.insert(
+        key.to_string(),
+        CachedGzip {
+            mtime: 0,
+            size: data.len() as u64,
+            body: body.clone(),
+        },
+    );
+    Ok(body)
+}
+
+/// Build an HTTP response straight from a Jankx page-cache entry.
+fn edge_cache_response(page: &CachedPage, method: &str, accepts_gzip: bool) -> Response<Full<Bytes>> {
+    let compressible = page.content_type.to_ascii_lowercase().contains("html")
+        || page.content_type.to_ascii_lowercase().contains("text/")
+        || page.content_type.to_ascii_lowercase().contains("json");
+    let compressed = if accepts_gzip && compressible {
+        cached_gzip_bytes(&page.file, &page.html).ok()
+    } else {
+        None
+    };
+    let body = compressed.clone().unwrap_or_else(|| Bytes::from(page.html.clone()));
+    let status = StatusCode::from_u16(page.status).unwrap_or(StatusCode::OK);
+
+    let mut builder = Response::builder()
+        .status(status)
+        .header("server", "LarvaPHP")
+        .header("x-content-type-options", "nosniff")
+        .header("x-frame-options", "DENY")
+        .header("cache-control", "no-cache")
+        .header("x-jankx-cache", "HIT")
+        .header("x-larva-edge-cache", "HIT")
+        .header("content-type", page.content_type.as_str())
+        .header("content-length", body.len().to_string());
+    if let Some(alt) = alt_svc_header() {
+        builder = builder.header("alt-svc", alt);
+    }
+    if compressed.is_some() {
+        builder = builder
+            .header("content-encoding", "gzip")
+            .header("vary", "accept-encoding");
+    }
+
+    let is_head = method.eq_ignore_ascii_case("HEAD");
+    builder
+        .body(Full::new(if is_head { Bytes::new() } else { body }))
+        .unwrap()
 }
 
 /// WordPress adds `?ver=` (and similar) to versioned assets, whose URL changes

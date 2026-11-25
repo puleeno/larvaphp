@@ -31,6 +31,7 @@ pub mod context;
 pub mod embed;
 pub mod embed_php;
 pub mod env;
+pub mod edge_cache;
 pub mod errors;
 pub mod fastcgi;
 pub mod http3;
