@@ -28,6 +28,18 @@ struct Args {
     #[arg(long = "vhost", value_name = "DOMAIN=ROOT[;ALIASES]")]
     vhost: Vec<String>,
 
+    /// Features enabled for the default virtual host (comma-separated).
+    /// Default: all. Use `-name` to disable, e.g. `all,-http3` or
+    /// `http3,acme,embedded`. Lazy-loaded: disabled features are never
+    /// initialized (zero runtime overhead).
+    #[arg(long = "features", value_name = "LIST")]
+    features: Option<String>,
+
+    /// Features for a specific virtual host, repeatable.
+    /// Format: `domain=feat1,feat2` or `domain=+feat1,-feat2` (delta).
+    #[arg(long = "vhost-features", value_name = "DOMAIN=LIST")]
+    vhost_features: Vec<String>,
+
     /// Address to bind the server to
     #[arg(short = 'a', long = "addr", default_value = "127.0.0.1:8000")]
     addr: String,
@@ -372,22 +384,45 @@ fn main() -> ExitCode {
             }
         };
 
-        // Embedded mode: use the in-process PHP runtime (no php-cgi spawn).
-        if args.embedded {
-            #[cfg(feature = "embedded")]
-            {
-                std::env::set_var("LARVA_PHP_EXECUTOR", "ffi");
-                tracing::info!("embedded PHP mode enabled (in-process, no php-cgi spawn)");
-            }
-            #[cfg(not(feature = "embedded"))]
-            {
-                eprintln!("--embedded requires building with --features embedded");
-                return ExitCode::from(1);
-            }
-        }
-
         // Initialize PHP runtime
         let mut server = larva_php::server::Server::new(&root).unwrap();
+
+        // Resolve the default vhost's feature set (Strategy + Lazy). Start from
+        // --features (absolute set, or delta on all when it contains '-'/'+'/
+        // 'all'), then apply legacy flags additively for backward compat.
+        let mut default_features = match &args.features {
+            Some(spec) if spec.contains('-') || spec.contains('+') || spec.contains("all") => {
+                let mut f = larva_php::VhostFeatures::all();
+                f.apply_delta(spec);
+                f
+            }
+            Some(spec) => larva_php::VhostFeatures::parse(spec),
+            None => larva_php::VhostFeatures::all(),
+        };
+        if args.embedded {
+            default_features.enable(larva_php::FeatureKind::Embedded);
+        }
+        if args.workers > 0 {
+            default_features.enable(larva_php::FeatureKind::Workers);
+        }
+        if args.http3 {
+            default_features.enable(larva_php::FeatureKind::Http3);
+        }
+        if args.lets_encrypt {
+            default_features.enable(larva_php::FeatureKind::Acme);
+        }
+        if args.panel.is_some() {
+            default_features.enable(larva_php::FeatureKind::Panel);
+        }
+        server.set_features(default_features);
+        tracing::info!(
+            "default vhost features: {}",
+            server
+                .features()
+                .features()
+                .enabled_names()
+                .join(", ")
+        );
 
         // Apply php.ini overrides from --php-ini KEY=VALUE flags.
         if !args.php_ini.is_empty() {
@@ -408,8 +443,23 @@ fn main() -> ExitCode {
 
         server.activate();
 
-        // Optionally start the 2-layer runtime worker pool (fault-isolated PHP).
-        if args.workers > 0 {
+        // Embedded mode: use the in-process PHP runtime (lazy: only if enabled).
+        if server.feature_enabled(larva_php::FeatureKind::Embedded) {
+            #[cfg(feature = "embedded")]
+            {
+                std::env::set_var("LARVA_PHP_EXECUTOR", "ffi");
+                tracing::info!("embedded PHP mode enabled (in-process, no php-cgi spawn)");
+            }
+            #[cfg(not(feature = "embedded"))]
+            {
+                eprintln!("embedded feature requires building with --features embedded");
+                return ExitCode::from(1);
+            }
+        }
+
+        // Optionally start the 2-layer runtime worker pool (lazy: only if the
+        // Workers feature is enabled for this vhost).
+        if args.workers > 0 && server.feature_enabled(larva_php::FeatureKind::Workers) {
             match larva_php::runtime::init_pool(args.workers) {
                 Ok(()) => tracing::info!("runtime worker pool: {} workers", args.workers),
                 Err(e) => {
@@ -445,9 +495,11 @@ fn main() -> ExitCode {
         };
 
         #[cfg(feature = "http3")]
-        if args.http3 || args.lets_encrypt {
+        if server.feature_enabled(larva_php::FeatureKind::Http3)
+            || server.feature_enabled(larva_php::FeatureKind::Acme)
+        {
             // Obtain a Let's Encrypt certificate if requested.
-            let (le_cert, le_key) = if args.lets_encrypt {
+            let (le_cert, le_key) = if server.feature_enabled(larva_php::FeatureKind::Acme) {
                 if args.acme_email.is_none() || args.acme_domains.is_none() {
                     eprintln!(
                         "--lets-encrypt requires --acme-email and --acme-domains"
@@ -566,9 +618,9 @@ fn main() -> ExitCode {
         }
 
         #[cfg(not(feature = "http3"))]
-        if args.lets_encrypt {
+        if server.feature_enabled(larva_php::FeatureKind::Acme) {
             eprintln!(
-                "--lets-encrypt requires building with --features http3,acme"
+                "acme feature requires building with --features http3,acme"
             );
             return ExitCode::from(1);
         }
@@ -576,14 +628,33 @@ fn main() -> ExitCode {
         // Build the virtual-host registry (multi-tenant, one shared port).
         // The --root server is the default vhost; each --vhost spec adds an
         // isolated site selected by the request Host header.
+        // Capture the Panel flag before `server` is moved into the vhost list.
+        let panel_enabled = server.feature_enabled(larva_php::FeatureKind::Panel);
         server.name = args.server_name.clone();
+        // Per-vhost feature deltas from --vhost-features DOMAIN=LIST.
+        let mut vhost_feature_deltas: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        for vf in &args.vhost_features {
+            if let Some((domain, list)) = vf.split_once('=') {
+                vhost_feature_deltas.insert(domain.trim().to_string(), list.to_string());
+            } else {
+                eprintln!("Invalid --vhost-features '{}' (expected DOMAIN=LIST)", vf);
+                return ExitCode::from(1);
+            }
+        }
         let mut vhosts: Vec<std::sync::Arc<larva_php::server::Server>> =
             vec![std::sync::Arc::new(server)];
         for spec in &args.vhost {
             match larva_php::server::parse_vhost_spec(spec) {
                 Ok((domain, vroot, aliases)) => match larva_php::server::Server::new(&vroot) {
                     Ok(mut v) => {
-                        v.set_domains(domain, aliases);
+                        v.set_domains(domain.clone(), aliases);
+                        // Per-vhost features: default all, apply delta if present.
+                        if let Some(delta) = vhost_feature_deltas.get(&domain) {
+                            let mut f = larva_php::VhostFeatures::all();
+                            f.apply_delta(delta);
+                            v.set_features(f);
+                        }
                         v.activate();
                         tracing::info!("vhost '{}' -> {}", v.domain(), vroot);
                         vhosts.push(std::sync::Arc::new(v));
@@ -605,9 +676,10 @@ fn main() -> ExitCode {
         // Runs in a COMPLETELY SEPARATE OS thread with its own Tokio runtime.
         // If the panel panics or crashes, it cannot affect the main PHP server.
         // The panel hot-reloads the vhost router above when websites change.
-        if let Some(panel_port) = &args.panel {
+        if args.panel.is_some() && panel_enabled {
             #[cfg(feature = "panel")]
             {
+                let panel_port = args.panel.as_deref().unwrap_or("9000");
                 let port = panel_port.parse::<u16>().unwrap_or(9000);
                 let panel_addr = format!("0.0.0.0:{}", port);
                 tracing::info!("Starting isolated web control panel on http://{}", panel_addr);

@@ -95,6 +95,10 @@ pub struct Server {
     pub max_body_size: u64,
     /// PHP configuration overrides (`php_ini` / `-d` directives).
     pub php_ini: HashMap<String, String>,
+    /// Per-vhost lazy feature manager (Strategy + Lazy Initialization).
+    /// Decides which features (HTTP/3, ACME, embedded, workers, ...) this
+    /// virtual host loads, and initializes them on first use only.
+    pub features: crate::features::FeatureManager,
     #[cfg(feature = "acme")]
     /// Directory where HTTP-01 challenge tokens are written, served at
     /// `/.well-known/acme-challenge/<token>`.
@@ -319,6 +323,7 @@ impl Server {
             rate_limiter: RateLimiter::new(RateLimitConfig::default()),
             max_body_size: 10 * 1024 * 1024, // 10 MB
             php_ini: HashMap::new(),
+            features: crate::features::FeatureManager::all(),
             #[cfg(feature = "acme")]
             acme_challenge_dir: None,
         })
@@ -343,6 +348,7 @@ impl Server {
             rate_limiter: RateLimiter::new(RateLimitConfig::default()),
             max_body_size: 10 * 1024 * 1024, // 10 MB
             php_ini: HashMap::new(),
+            features: crate::features::FeatureManager::all(),
             #[cfg(feature = "acme")]
             acme_challenge_dir: None,
         }
@@ -351,6 +357,21 @@ impl Server {
     /// Set PHP configuration overrides (applied as `-d key=value` to php-cgi).
     pub fn set_php_ini(&mut self, ini: HashMap<String, String>) {
         self.php_ini = ini;
+    }
+
+    /// Replace this vhost's feature set (e.g. from the control panel).
+    pub fn set_features(&mut self, features: crate::features::VhostFeatures) {
+        self.features = crate::features::FeatureManager::new(features);
+    }
+
+    /// The vhost's lazy feature manager.
+    pub fn features(&self) -> &crate::features::FeatureManager {
+        &self.features
+    }
+
+    /// Whether a feature is enabled for this vhost.
+    pub fn feature_enabled(&self, kind: crate::features::FeatureKind) -> bool {
+        self.features.is_enabled(kind)
     }
 
     #[cfg(feature = "acme")]

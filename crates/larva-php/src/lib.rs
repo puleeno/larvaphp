@@ -33,6 +33,7 @@ pub mod embed_php;
 pub mod env;
 pub mod errors;
 pub mod fastcgi;
+pub mod features;
 pub mod http3;
 pub mod metrics;
 pub mod options;
@@ -64,6 +65,7 @@ pub use config::{
 };
 pub use completions::Shell;
 pub use errors::{Error, Result};
+pub use features::{FeatureKind, FeatureManager, VhostFeatures};
 pub use options::{Option, WorkerOption, ServerOption, RequestOption};
 pub use path_resolver::{
     default_resolver, make_native, resolve_root, PathResolver, UnixPathResolver,
