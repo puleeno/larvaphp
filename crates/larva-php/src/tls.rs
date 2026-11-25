@@ -74,6 +74,19 @@ pub fn build_server_config(cert_path: &str, key_path: &str) -> Result<rustls::Se
             ))
         })?;
     config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+
+    // rustls disables TLS 1.3 tickets by default. Without a ticketer every new
+    // connection (browser tabs, HTTP/2 connection resets, browsers that resume
+    // after Alt-Svc) pays for a full handshake. Caddy/FrankenPHP enable session
+    // tickets out of the box, so match that behaviour here. The ring ticketer
+    // rotates 12-hour keys automatically and is safe to share across accepts.
+    config.ticketer = rustls::crypto::ring::Ticketer::new().map_err(|e| {
+        Error::Io(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            format!("create TLS session ticket generator: {}", e),
+        ))
+    })?;
+
     Ok(config)
 }
 

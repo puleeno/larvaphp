@@ -7,10 +7,12 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, OnceLock, RwLock};
 use std::task::{Context, Poll};
 use std::time::{SystemTime, UNIX_EPOCH, Instant};
+use std::io::Write;
 use bytes::Bytes;
+use flate2::{write::GzEncoder, Compression};
 use http_body_util::BodyExt;
 use http_body_util::Full;
 use hyper::service::service_fn;
@@ -530,8 +532,18 @@ impl Server {
 
         // Serve static files directly (not .php)
         if let Some(ext) = std::path::Path::new(&script_path).extension() {
-            if ext.to_string_lossy() != "php" {
-                return self.serve_static_file(&script_path).await;
+            if !ext.to_string_lossy().eq_ignore_ascii_case("php") {
+                let uri = req
+                    .uri()
+                    .path_and_query()
+                    .map(|pq| pq.as_str())
+                    .unwrap_or_else(|| req.uri().path());
+                return serve_static_file_nginx(
+                    &script_path,
+                    req.method().as_str(),
+                    req.headers(),
+                    uri,
+                );
             }
         }
 
@@ -658,26 +670,27 @@ impl Server {
             script_path
         };
 
-        // Static (non-.php) files: serve directly.
+        // Static (non-.php) files: serve through the same nginx-style pipeline
+        // used by HTTP/1.1 and HTTP/2 (ETag, validators, gzip, Cache-Control).
         if let Some(ext) = std::path::Path::new(&script_path).extension() {
-            if ext.to_string_lossy() != "php" {
-                // Block sensitive files even for static serving (defense in depth).
-                if is_sensitive_file(&script_path) {
-                    return Ok((
-                        StatusCode::FORBIDDEN,
-                        vec![("content-type".to_string(), "text/plain".to_string())],
-                        b"Forbidden".to_vec(),
-                    ));
+            if !ext.to_string_lossy().eq_ignore_ascii_case("php") {
+                let mut h3_headers = hyper::HeaderMap::new();
+                for (name, value) in req_headers {
+                    if let (Ok(name), Ok(value)) = (
+                        hyper::header::HeaderName::from_bytes(name.as_bytes()),
+                        hyper::header::HeaderValue::from_str(value),
+                    ) {
+                        h3_headers.insert(name, value);
+                    }
                 }
-                if let Ok(content) = std::fs::read(&script_path) {
-                    let mime = mime_type_static(&script_path);
-                    let headers = vec![
-                        ("server".to_string(), "LarvaPHP".to_string()),
-                        ("content-type".to_string(), mime.to_string()),
-                        ("content-length".to_string(), content.len().to_string()),
-                    ];
-                    return Ok((StatusCode::OK, headers, content));
-                }
+                return match serve_static_file_parts(&script_path, method, &h3_headers, uri) {
+                    Ok(parts) => Ok((parts.status, parts.headers, parts.body.to_vec())),
+                    Err(_) => Ok((
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        vec![("server".to_string(), "LarvaPHP".to_string())],
+                        b"Internal Server Error".to_vec(),
+                    )),
+                };
             }
         }
 
@@ -784,13 +797,6 @@ impl Server {
         }
 
         None
-    }
-
-    /// Serve a static file directly with nginx-style optimizations:
-    /// file metadata cache, ETag, Last-Modified headers.
-    async fn serve_static_file(&self, path: &str) -> Result<Response<Full<Bytes>>> {
-        // Share the nginx-style implementation with the main request loop.
-        serve_static_file_nginx(path, "GET", &hyper::HeaderMap::new())
     }
 
     /// Determine MIME type from file extension (kept for the unit tests;
@@ -1109,7 +1115,12 @@ impl Server {
         // conditional requests, HEAD, ranges and gzip_static variants.
         if let Some(ext) = std::path::Path::new(&path).extension() {
             if !ext.to_string_lossy().eq_ignore_ascii_case("php") {
-                return match serve_static_file_nginx(&path, req.method().as_str(), req.headers()) {
+                return match serve_static_file_nginx(
+                    &path,
+                    req.method().as_str(),
+                    req.headers(),
+                    &uri,
+                ) {
                     Ok(response) => Ok(response),
                     Err(_) => Ok(Response::builder()
                         .status(StatusCode::INTERNAL_SERVER_ERROR)
@@ -2099,38 +2110,123 @@ fn if_range_matches(value: &str, etag: &str, mtime: u64) -> bool {
     }
 }
 
+/// Transport-independent static response, shared by the hyper (HTTP/1.1,
+/// HTTP/2) and quiche (HTTP/3) front-ends.
+struct StaticResponse {
+    status: StatusCode,
+    headers: Vec<(String, String)>,
+    body: Bytes,
+}
+
+fn static_response(status: StatusCode, headers: Vec<(&str, String)>, body: Bytes) -> StaticResponse {
+    StaticResponse {
+        status,
+        headers: headers
+            .into_iter()
+            .map(|(name, value)| (name.to_string(), value))
+            .collect(),
+        body,
+    }
+}
+
+/// Cached gzip variant of a static file. Invalidated by (mtime, size), so a
+/// changed asset is recompressed on the next request without a manual purge.
+#[derive(Clone)]
+struct CachedGzip {
+    mtime: u64,
+    size: u64,
+    body: Bytes,
+}
+
+static GZIP_CACHE: OnceLock<DashMap<String, CachedGzip>> = OnceLock::new();
+const GZIP_CACHE_MAX_ENTRIES: usize = 512;
+
+fn gzip_cache() -> &'static DashMap<String, CachedGzip> {
+    GZIP_CACHE.get_or_init(DashMap::new)
+}
+
+fn gzip_bytes(data: &[u8]) -> Result<Bytes> {
+    let mut encoder = GzEncoder::new(Vec::with_capacity(data.len() / 2), Compression::fast());
+    encoder.write_all(data).map_err(Error::Io)?;
+    Ok(Bytes::from(encoder.finish().map_err(Error::Io)?))
+}
+
+fn cached_gzip(path: &str, mtime: u64, size: u64) -> Result<Bytes> {
+    let cache = gzip_cache();
+    if let Some(entry) = cache.get(path) {
+        if entry.mtime == mtime && entry.size == size {
+            return Ok(entry.body.clone());
+        }
+    }
+
+    let body = gzip_bytes(&std::fs::read(path).map_err(Error::Io)?)?;
+    // Keep the cache bounded; WordPress installs are large but only a few
+    // hundred assets are ever requested hot.
+    if cache.len() >= GZIP_CACHE_MAX_ENTRIES {
+        cache.clear();
+    }
+    cache.insert(
+        path.to_string(),
+        CachedGzip {
+            mtime,
+            size,
+            body: body.clone(),
+        },
+    );
+    Ok(body)
+}
+
+/// WordPress adds `?ver=` (and similar) to versioned assets, whose URL changes
+/// when the file changes: those can be cached permanently. Unversioned files
+/// get a shorter lifetime so deployments are still picked up quickly.
+fn static_cache_control(uri: &str) -> &'static str {
+    let query = uri.split_once('?').map(|(_, q)| q).unwrap_or("");
+    let versioned = query.split('&').any(|pair| {
+        let key = pair.split_once('=').map(|(k, _)| k).unwrap_or(pair);
+        matches!(key, "ver" | "v" | "version" | "rev")
+    });
+    if versioned {
+        "public, max-age=31536000, immutable"
+    } else {
+        "public, max-age=3600"
+    }
+}
+
 /// nginx-style static delivery: validators, conditional requests, HEAD,
-/// byte ranges and precompressed `.gz` variants. Only safe methods are served;
-/// POST/PUT/PATCH/DELETE get 405 (they belong to PHP, never to the file cache).
-fn serve_static_file_nginx(
+/// byte ranges, gzip (runtime or precompressed `.gz`) and Cache-Control.
+/// Only safe methods are served; POST/PUT/PATCH/DELETE get 405.
+fn serve_static_file_parts(
     path: &str,
     method: &str,
     headers: &hyper::HeaderMap,
-) -> Result<Response<Full<Bytes>>> {
+    uri: &str,
+) -> Result<StaticResponse> {
+    let srv = || ("server", "LarvaPHP".to_string());
     if !matches!(method, "GET" | "HEAD") {
-        return Ok(Response::builder()
-            .status(StatusCode::METHOD_NOT_ALLOWED)
-            .header("allow", "GET, HEAD")
-            .header("server", "LarvaPHP")
-            .body(Full::new(Bytes::from_static(b"Method Not Allowed")))
-            .unwrap());
+        return Ok(static_response(
+            StatusCode::METHOD_NOT_ALLOWED,
+            vec![("allow", "GET, HEAD".to_string()), srv()],
+            Bytes::from_static(b"Method Not Allowed"),
+        ));
     }
     if is_sensitive_file(path) {
-        return Ok(Response::builder()
-            .status(StatusCode::FORBIDDEN)
-            .header("content-type", "text/plain; charset=UTF-8")
-            .header("server", "LarvaPHP")
-            .body(Full::new(Bytes::from_static(b"Forbidden")))
-            .unwrap());
+        return Ok(static_response(
+            StatusCode::FORBIDDEN,
+            vec![
+                ("content-type", "text/plain; charset=UTF-8".to_string()),
+                srv(),
+            ],
+            Bytes::from_static(b"Forbidden"),
+        ));
     }
+
+    let accepts_gzip = header_value(headers, "accept-encoding")
+        .is_some_and(|v| v.to_ascii_lowercase().contains("gzip"));
 
     // gzip_static: prefer a precompressed variant when the client accepts it.
     let mut served_gz = false;
     let mut disk_path = path.to_string();
-    if is_compressible_static(path)
-        && header_value(headers, "accept-encoding")
-            .is_some_and(|v| v.to_ascii_lowercase().contains("gzip"))
-    {
+    if is_compressible_static(path) && accepts_gzip {
         let gz = format!("{}.gz", path);
         if std::path::Path::new(&gz).is_file() {
             disk_path = gz;
@@ -2140,11 +2236,11 @@ fn serve_static_file_nginx(
 
     let meta = std::fs::metadata(&disk_path).map_err(Error::Io)?;
     if !meta.is_file() {
-        return Ok(Response::builder()
-            .status(StatusCode::NOT_FOUND)
-            .header("server", "LarvaPHP")
-            .body(Full::new(Bytes::from_static(b"Not Found")))
-            .unwrap());
+        return Ok(static_response(
+            StatusCode::NOT_FOUND,
+            vec![srv()],
+            Bytes::from_static(b"Not Found"),
+        ));
     }
     let total = meta.len();
     let mtime = meta
@@ -2153,26 +2249,40 @@ fn serve_static_file_nginx(
         .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    let etag = format!("\"{:x}-{:x}\"", mtime, total);
+
+    // Compress on the fly only when there is no precompressed file and no
+    // byte-range request (ranges must apply to the identity representation).
+    let gzip_live = !served_gz
+        && is_compressible_static(path)
+        && accepts_gzip
+        && header_value(headers, "range").is_none();
+    let compressed = served_gz || gzip_live;
+    let etag = format!(
+        "\"{:x}-{:x}{}\"",
+        mtime,
+        total,
+        if compressed { "-gzip" } else { "" }
+    );
+    let cache_control = static_cache_control(uri).to_string();
 
     // Validators are checked before we ever read the body (nginx filters do
     // the same), so 304/412 responses stay cheap.
     if let Some(v) = header_value(headers, "if-match") {
         if !etag_matches(v, &etag) {
-            return Ok(Response::builder()
-                .status(StatusCode::PRECONDITION_FAILED)
-                .header("server", "LarvaPHP")
-                .body(Full::new(Bytes::from_static(b"Precondition Failed")))
-                .unwrap());
+            return Ok(static_response(
+                StatusCode::PRECONDITION_FAILED,
+                vec![srv()],
+                Bytes::from_static(b"Precondition Failed"),
+            ));
         }
     }
     if let Some(v) = header_value(headers, "if-unmodified-since") {
         if parse_http_date(v).is_some_and(|d| mtime > d) {
-            return Ok(Response::builder()
-                .status(StatusCode::PRECONDITION_FAILED)
-                .header("server", "LarvaPHP")
-                .body(Full::new(Bytes::from_static(b"Precondition Failed")))
-                .unwrap());
+            return Ok(static_response(
+                StatusCode::PRECONDITION_FAILED,
+                vec![srv()],
+                Bytes::from_static(b"Precondition Failed"),
+            ));
         }
     }
 
@@ -2183,13 +2293,17 @@ fn serve_static_file_nginx(
         not_modified = parse_http_date(v).is_some_and(|d| mtime <= d);
     }
     if not_modified {
-        return Ok(Response::builder()
-            .status(StatusCode::NOT_MODIFIED)
-            .header("etag", &etag)
-            .header("last-modified", http_date(mtime))
-            .header("server", "LarvaPHP")
-            .body(Full::new(Bytes::new()))
-            .unwrap());
+        return Ok(static_response(
+            StatusCode::NOT_MODIFIED,
+            vec![
+                ("etag", etag),
+                ("last-modified", http_date(mtime)),
+                ("cache-control", cache_control),
+                ("vary", "Accept-Encoding".to_string()),
+                srv(),
+            ],
+            Bytes::new(),
+        ));
     }
 
     // Byte ranges, but only when If-Range still matches this representation.
@@ -2223,54 +2337,88 @@ fn serve_static_file_nginx(
         None => {
             if range_header.is_some() {
                 // Unsatisfiable Range: nginx returns 416 with Content-Range: */size.
-                return Ok(Response::builder()
-                    .status(StatusCode::RANGE_NOT_SATISFIABLE)
-                    .header("content-range", format!("bytes */{}", total))
-                    .header("accept-ranges", "bytes")
-                    .header("server", "LarvaPHP")
-                    .body(Full::new(Bytes::new()))
-                    .unwrap());
+                return Ok(static_response(
+                    StatusCode::RANGE_NOT_SATISFIABLE,
+                    vec![
+                        ("content-range", format!("bytes */{}", total)),
+                        ("accept-ranges", "bytes".to_string()),
+                        srv(),
+                    ],
+                    Bytes::new(),
+                ));
             }
             (StatusCode::OK, 0, total)
         }
     };
 
-    let mut builder = Response::builder()
-        .status(status)
-        .header("content-type", mime_type_static(path))
-        .header("content-length", length.to_string())
-        .header("last-modified", http_date(mtime))
-        .header("etag", &etag)
-        .header("accept-ranges", "bytes")
-        .header("x-content-type-options", "nosniff")
-        .header("x-frame-options", "DENY")
-        .header("server", "LarvaPHP");
-    if served_gz {
-        builder = builder
-            .header("content-encoding", "gzip")
-            .header("vary", "Accept-Encoding");
+    let body_len = if gzip_live {
+        cached_gzip(path, mtime, total)?.len() as u64
+    } else {
+        length
+    };
+
+    let mut resp_headers = vec![
+        ("content-type", mime_type_static(path)),
+        ("content-length", body_len.to_string()),
+        ("last-modified", http_date(mtime)),
+        ("etag", etag),
+        ("cache-control", cache_control),
+        ("x-content-type-options", "nosniff".to_string()),
+        ("x-frame-options", "DENY".to_string()),
+        srv(),
+    ];
+    if !gzip_live {
+        resp_headers.push(("accept-ranges", "bytes".to_string()));
+    }
+    if compressed {
+        resp_headers.push(("content-encoding", "gzip".to_string()));
+        resp_headers.push(("vary", "Accept-Encoding".to_string()));
     }
     if status == StatusCode::PARTIAL_CONTENT {
-        builder = builder.header(
+        resp_headers.push((
             "content-range",
             format!("bytes {}-{}/{}", offset, offset + length - 1, total),
-        );
+        ));
+    }
+    // Let browsers discover HTTP/3 from static responses too, not only from
+    // PHP responses (Caddy advertises Alt-Svc on every response).
+    if let Some(alt) = alt_svc_header() {
+        resp_headers.push(("alt-svc", alt));
     }
 
     // HEAD: identical headers, zero body (nginx header_only).
     if method == "HEAD" {
-        return Ok(builder.body(Full::new(Bytes::new())).unwrap());
+        return Ok(static_response(status, resp_headers, Bytes::new()));
     }
 
-    let content = std::fs::read(&disk_path).map_err(Error::Io)?;
-    let start = offset as usize;
-    let end = (offset + length) as usize;
-    let body = if start == 0 && end == content.len() {
-        Bytes::from(content)
+    let body = if gzip_live {
+        cached_gzip(path, mtime, total)?
     } else {
-        Bytes::copy_from_slice(&content[start..end])
+        let content = std::fs::read(&disk_path).map_err(Error::Io)?;
+        let start = offset as usize;
+        let end = (offset + length) as usize;
+        if start == 0 && end == content.len() {
+            Bytes::from(content)
+        } else {
+            Bytes::copy_from_slice(&content[start..end])
+        }
     };
-    Ok(builder.body(Full::new(body)).unwrap())
+    Ok(static_response(status, resp_headers, body))
+}
+
+/// Hyper adapter for the shared static pipeline.
+fn serve_static_file_nginx(
+    path: &str,
+    method: &str,
+    headers: &hyper::HeaderMap,
+    uri: &str,
+) -> Result<Response<Full<Bytes>>> {
+    let parts = serve_static_file_parts(path, method, headers, uri)?;
+    let mut builder = Response::builder().status(parts.status);
+    for (name, value) in &parts.headers {
+        builder = builder.header(name.as_str(), value.as_str());
+    }
+    Ok(builder.body(Full::new(parts.body)).unwrap())
 }
 
 /// URL-decode a string.
@@ -2908,6 +3056,85 @@ mod tests {
         let header = alt_svc_header().unwrap();
         assert_eq!(header, "h3=\":9443\"; ma=86400");
         set_http3_port(0); // reset
+    }
+
+    // === static delivery (gzip + cache headers) tests ===
+
+    #[test]
+    fn static_gzip_is_cached_and_decodes_to_original() {
+        use flate2::read::GzDecoder;
+        use std::io::Read;
+
+        let dir = std::env::temp_dir().join(format!("larva-gzip-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("app.js");
+        let content = "console.log('larva');".repeat(64);
+        std::fs::write(&path, &content).unwrap();
+
+        let mut headers = hyper::HeaderMap::new();
+        headers.insert("accept-encoding", "gzip".parse().unwrap());
+        let resp = serve_static_file_parts(
+            &path.to_string_lossy(),
+            "GET",
+            &headers,
+            "/app.js?ver=1.2",
+        )
+        .unwrap();
+
+        assert_eq!(resp.status, StatusCode::OK);
+        assert!(resp
+            .headers
+            .iter()
+            .any(|(n, v)| n == "content-encoding" && v == "gzip"));
+        assert!(resp.headers.iter().any(|(n, v)| n == "vary" && v == "Accept-Encoding"));
+        assert!(resp.headers.iter().any(|(n, v)| n == "cache-control"
+            && v == "public, max-age=31536000, immutable"));
+
+        let mut decoded = Vec::new();
+        GzDecoder::new(&resp.body[..]).read_to_end(&mut decoded).unwrap();
+        assert_eq!(decoded, content.as_bytes());
+
+        // Second request hits the in-memory cache and stays byte-identical.
+        let again = serve_static_file_parts(
+            &path.to_string_lossy(),
+            "GET",
+            &headers,
+            "/app.js?ver=1.2",
+        )
+        .unwrap();
+        assert_eq!(again.body, resp.body);
+        assert_eq!(
+            resp.headers.iter().find(|(n, _)| n == "etag").unwrap().1,
+            again.headers.iter().find(|(n, _)| n == "etag").unwrap().1
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn static_identity_has_no_gzip_and_short_cache() {
+        let dir = std::env::temp_dir().join(format!("larva-identity-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("logo.png");
+        std::fs::write(&path, b"\x89PNG\r\n\x1a\n").unwrap();
+
+        let resp = serve_static_file_parts(
+            &path.to_string_lossy(),
+            "GET",
+            &hyper::HeaderMap::new(),
+            "/logo.png",
+        )
+        .unwrap();
+
+        assert!(resp
+            .headers
+            .iter()
+            .all(|(n, _)| n != "content-encoding"));
+        assert!(resp.headers.iter().any(|(n, v)| n == "cache-control"
+            && v == "public, max-age=3600"));
+        assert_eq!(resp.body.as_ref(), b"\x89PNG\r\n\x1a\n");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // === handle_request_parts tests (HTTP/3 core) ===
