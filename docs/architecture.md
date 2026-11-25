@@ -2,6 +2,11 @@
 
 LarvaPHP is a Rust port of [FrankenPHP](https://frankenphp.dev). It embeds the PHP Zend Engine via C FFI and serves PHP applications through a high-performance asynchronous HTTP server.
 
+> **v2 multi-tenant:** a single port serves many isolated virtual hosts
+> (Nginx/Apache/LiteSpeed/Caddy-style) with per-vhost lazy features. See
+> [`multi-vhost.md`](multi-vhost.md) for the virtual-host router, feature
+> system, and configuration formats.
+
 ## Overview
 
 ```
@@ -64,9 +69,9 @@ LarvaPHP is a Rust port of [FrankenPHP](https://frankenphp.dev). It embeds the P
 
 ## Modules (larva-php crate)
 
-### `server` - Server Blocks
+### `server` - Server Blocks & Virtual Hosts
 
-The `Server` struct represents a scoped server block (virtual host). Each server has its own document root, rate limiter, worker pool, and file cache.
+The `Server` struct represents a scoped server block (virtual host). Each server has its own document root, rate limiter, worker pool, file cache, and **feature set**. In v2 a single listener serves many `Server` vhosts via the `VHostRouter` (see [`multi-vhost.md`](multi-vhost.md)).
 
 Key responsibilities:
 - HTTP request handling via Hyper
@@ -74,6 +79,11 @@ Key responsibilities:
 - File caching with ETag/MTIME
 - Sensitive file protection
 - MIME type detection
+- Host-based vhost matching (`matches_host` with wildcard alias support)
+
+### `features` - Per-Vhost Lazy Feature System
+
+Each vhost declares which features it wants (`VhostFeatures`, defaults to all) and a `FeatureManager` **lazily** initializes a feature on first use only. Disabled features are never initialized (zero overhead). Uses the Strategy pattern (`ensure(kind, init_closure)`) + Registry (`FeatureKind`) + Lazy Initialization (`Mutex<HashSet>`). See [`multi-vhost.md`](multi-vhost.md).
 
 ### `context` - Per-Request Context
 
@@ -184,10 +194,13 @@ Generates PHP-compatible phpinfo() output for debugging.
 | Pattern | Where | Purpose |
 |---------|-------|---------|
 | Strategy | `config.rs` | Multiple config format parsers (CLI, Apache, Nginx, Caddy) |
+| Strategy | `features.rs` | `FeatureManager::ensure(kind, init)` — lazy feature loading |
 | Builder | `options.rs` | Step-by-step configuration construction |
 | Chain of Responsibility | `config.rs` | Middleware pipeline for request preprocessing |
 | Adapter | `cgi.rs` | HTTP headers → PHP `$_SERVER` variables |
-| Flyweight | `server.rs` | `Arc<DashMap>` shared rate limiter state |
+| Flyweight | `server.rs` | `Arc<Server>` vhosts shared across connections |
+| Registry | `server.rs` / `features.rs` | `VHostRouter` (vhosts) / `FeatureKind` (features) |
+| Lazy Initialization | `features.rs` | `Mutex<HashSet>` tracks loaded features, init once |
 | State Machine | `thread.rs` | PHP thread lifecycle management |
 | Observer | `watcher.rs` | File change notifications |
 | Atomic Swap | `watcher.rs` | `ArcSwap` for lock-free config hot-reload |

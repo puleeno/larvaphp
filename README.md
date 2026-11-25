@@ -10,6 +10,7 @@ larva-php/
 ├── README.md
 ├── docs/
 │   ├── architecture.md             # System architecture
+│   ├── multi-vhost.md              # Multi-tenant vhosts & per-vhost lazy features
 │   ├── embedded-php.md             # Embedded PHP via C shim (in-process PHP)
 │   ├── configuration.md            # Configuration reference
 │   ├── api.md                      # Public API documentation
@@ -23,7 +24,8 @@ larva-php/
     │       ├── lib.rs              # Public API entry point
     │       ├── main.rs             # CLI binary
     │       ├── config.rs           # Server config (Strategy/Builder/Chain of Responsibility)
-    │       ├── server.rs           # Server blocks & rate limiting
+    │       ├── features.rs         # Per-vhost lazy feature system (Strategy + Registry + Lazy)
+    │       ├── server.rs           # Server blocks, VHostRouter & rate limiting
     │       ├── context.rs          # Per-request PHP context
     │       ├── cgi.rs              # CGI variables & path splitting
     │       ├── thread.rs           # PHP thread state machine
@@ -41,6 +43,7 @@ larva-php/
     │       └── phpinfo.rs          # phpinfo() integration
     ├── larva-php-sys/              # FFI bindings to Zend Engine
     ├── larva-php-caddy/            # Caddy module
+    ├── larva-php-panel/            # Web control panel (Axum + SQLite + SPA)
     └── larva-php-extgen/           # Extension generator
 ```
 
@@ -48,10 +51,12 @@ larva-php/
 
 - **PHP 8.2+ support** via Zend Engine C API (embedded, not CGI)
 - **High-performance HTTP server** built on Hyper/Tokio
-- **Multiple config formats**: CLI `--root`, Apache `<DocumentRoot>`, Nginx `root`, Caddyfile `root`
+- **Multi-tenant virtual hosts**: one port, many isolated sites selected by `Host` header (Nginx/Apache/LiteSpeed/Caddy-style)
+- **Per-vhost lazy features**: each site declares which features it wants (HTTP/3, ACME, embedded, workers, panel); disabled features are never initialized (zero overhead)
+- **Multiple config formats**: CLI `--root`/`--vhost`, Apache `<VirtualHost>`, Nginx `server`, Caddyfile site blocks
 - **Middleware chain**: Chain of Responsibility pattern for request preprocessing (rewrite, .htaccess-style rules)
-- **Rate limiting**: Fixed-window per-IP rate limiter with configurable limits
-- **Hot reload**: File watching with debounce and atomic config swap (ArcSwap)
+- **Rate limiting**: Fixed-window per-IP rate limiter with configurable limits (per vhost)
+- **Hot reload**: File watching with debounce and atomic config swap (ArcSwap); panel hot-reloads vhosts
 - **Security headers**: `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`
 - **Sensitive file protection**: Blocks access to `.env`, `.git/`, `wp-config.php`, etc.
 - **Worker mode**: Persistent PHP scripts for reduced overhead
@@ -138,9 +143,25 @@ systemd units and an env template live in
 .\build.ps1 --release --features embedded
 .\target\release\larva-php.exe --root C:\path\to\php-app --workers 4 --addr 127.0.0.1:8000
 
+# Multi-tenant: many isolated sites on one port (Host-based routing)
+.\target\release\larva-php.exe `
+  --root C:\www\a --server-name a.com `
+  --vhost "b.com=C:\www\b;www.b.com" `
+  --addr 0.0.0.0:8000
+
+# Per-vhost features (lazy: disabled features never initialize)
+.\target\release\larva-php.exe `
+  --root C:\www\a --server-name a.com `
+  --vhost "api.com=C:\www\api" `
+  --vhost-features "api.com=-http3,-acme,-panel" `
+  --addr 0.0.0.0:8000
+
 # Run a PHP script directly
 .\target\release\larva-php.exe script.php arg1 arg2
 ```
+
+See [`docs/multi-vhost.md`](docs/multi-vhost.md) for the full multi-tenant
+architecture, per-vhost feature system, and configuration formats.
 
 ### Transport modes
 
@@ -168,23 +189,32 @@ FFI. A segfault in a worker is isolated and respawned by the master. See
 
 | Option | Short | Default | Description |
 |--------|-------|---------|-------------|
-| `--root <DIR>` | `-r` | (required for server mode) | Document root directory |
+| `--root <DIR>` | `-r` | (required for server mode) | Document root (default vhost) |
+| `--server-name <NAME>` | — | `localhost` | Primary domain of default vhost |
+| `--vhost <SPEC>` | — | — | Additional vhost `DOMAIN=ROOT[;ALIASES]` (repeatable) |
+| `--features <LIST>` | — | `all` | Features for default vhost (`all,-http3` or `http3,acme`) |
+| `--vhost-features <SPEC>` | — | — | Per-vhost feature delta `DOMAIN=LIST` (repeatable) |
 | `--addr <ADDR>` | `-a` | `127.0.0.1:8000` | Bind address |
+| `--workers <N>` | — | `0` | Worker pool size |
+| `--http3` / `--embedded` / `--lets-encrypt` / `--panel <PORT>` | — | off | Legacy feature toggles (map to features) |
 | `--version` | `-v` | - | Show version |
 | `--help` | `-h` | - | Show help |
 
 ### Supported Config Formats
 
-LarvaPHP accepts configuration in multiple formats through the Strategy pattern:
+LarvaPHP accepts configuration in multiple formats through the Strategy pattern.
+For **multi-vhost** (one port, many sites), use `--vhost` / `--vhost-features`
+or the `VHostRouter` API:
 
 | Format | Parser | Example |
 |--------|--------|---------|
-| CLI | `CliParser` | `--root /var/www/html` |
-| Apache | `ApacheParser` | `<DocumentRoot "/var/www/html">` |
-| Nginx | `NginxParser` | `root /var/www/html;` |
-| Caddy | `CaddyParser` | `root * /var/www/html` |
+| CLI | `CliParser` | `--root /var/www/html` / `--vhost "b.com=/var/www/b"` |
+| Apache | `ApacheParser` | `<VirtualHost *:80><DocumentRoot ...></VirtualHost>` |
+| Nginx | `NginxParser` | `server { root /var/www/html; server_name ...; }` |
+| Caddy | `CaddyParser` | `example.com { root * /var/www/html }` |
 
-See [`docs/configuration.md`](docs/configuration.md) for details.
+See [`docs/configuration.md`](docs/configuration.md) and
+[`docs/multi-vhost.md`](docs/multi-vhost.md) for details.
 
 ### Rate Limiting
 
