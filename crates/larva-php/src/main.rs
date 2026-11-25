@@ -16,6 +16,18 @@ struct Args {
     #[arg(short = 'r', long = "root", value_name = "DIR")]
     root: Option<String>,
 
+    /// Primary domain name for the default virtual host (Nginx `server_name`).
+    /// Defaults to "localhost".
+    #[arg(long = "server-name", value_name = "NAME", default_value = "localhost")]
+    server_name: String,
+
+    /// Additional virtual host, repeatable. Format: `domain=root` or
+    /// `domain=root;alias1,alias2` (aliases are Nginx/Apache ServerAlias-style).
+    /// Each vhost is isolated (own document root, workers, php.ini) but shares
+    /// the same listening port, selected by the request Host header.
+    #[arg(long = "vhost", value_name = "DOMAIN=ROOT[;ALIASES]")]
+    vhost: Vec<String>,
+
     /// Address to bind the server to
     #[arg(short = 'a', long = "addr", default_value = "127.0.0.1:8000")]
     addr: String,
@@ -126,6 +138,44 @@ struct Args {
     /// Hidden: test the embedded PHP request executor with mock CGI data.
     #[arg(long = "ffi-request-test", hide = true, value_name = "SCRIPT")]
     ffi_request_test: Option<String>,
+}
+
+/// Hot-reload bridge: the control panel calls this after website changes so the
+/// live server rebuilds its virtual-host routing table. Each panel website
+/// becomes an isolated [`Server`] vhost (own document root, workers, php.ini).
+#[cfg(feature = "panel")]
+struct RouterReloader {
+    router: std::sync::Arc<larva_php::server::VHostRouter>,
+}
+
+#[cfg(feature = "panel")]
+impl larva_php::panel::VHostReloader for RouterReloader {
+    fn reload(&self, websites: Vec<larva_php::panel::api::Website>) {
+        let vhosts: Vec<std::sync::Arc<larva_php::server::Server>> = websites
+            .into_iter()
+            .filter(|w| w.is_active)
+            .map(|w| {
+                let aliases: Vec<String> = w
+                    .acme_domains
+                    .as_deref()
+                    .unwrap_or("")
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                match larva_php::server::Server::new(&w.document_root) {
+                    Ok(mut s) => {
+                        s.set_domains(w.domain.clone(), aliases);
+                        s.activate();
+                        std::sync::Arc::new(s)
+                    }
+                    Err(_) => std::sync::Arc::new(larva_php::server::Server::fallback()),
+                }
+            })
+            .collect();
+        tracing::info!("panel hot-reload: {} active vhost(s)", vhosts.len());
+        self.router.replace_all(vhosts);
+    }
 }
 
 fn print_usage(out: &mut dyn std::io::Write) {
@@ -523,15 +573,49 @@ fn main() -> ExitCode {
             return ExitCode::from(1);
         }
 
+        // Build the virtual-host registry (multi-tenant, one shared port).
+        // The --root server is the default vhost; each --vhost spec adds an
+        // isolated site selected by the request Host header.
+        server.name = args.server_name.clone();
+        let mut vhosts: Vec<std::sync::Arc<larva_php::server::Server>> =
+            vec![std::sync::Arc::new(server)];
+        for spec in &args.vhost {
+            match larva_php::server::parse_vhost_spec(spec) {
+                Ok((domain, vroot, aliases)) => match larva_php::server::Server::new(&vroot) {
+                    Ok(mut v) => {
+                        v.set_domains(domain, aliases);
+                        v.activate();
+                        tracing::info!("vhost '{}' -> {}", v.domain(), vroot);
+                        vhosts.push(std::sync::Arc::new(v));
+                    }
+                    Err(e) => {
+                        eprintln!("Invalid vhost root '{}': {}", vroot, e);
+                        return ExitCode::from(1);
+                    }
+                },
+                Err(e) => {
+                    eprintln!("{}", e);
+                    return ExitCode::from(1);
+                }
+            }
+        }
+        let router = std::sync::Arc::new(larva_php::server::VHostRouter::new(vhosts));
+
         // Start the web control panel if --panel is specified.
         // Runs in a COMPLETELY SEPARATE OS thread with its own Tokio runtime.
         // If the panel panics or crashes, it cannot affect the main PHP server.
+        // The panel hot-reloads the vhost router above when websites change.
         if let Some(panel_port) = &args.panel {
             #[cfg(feature = "panel")]
             {
                 let port = panel_port.parse::<u16>().unwrap_or(9000);
                 let panel_addr = format!("0.0.0.0:{}", port);
                 tracing::info!("Starting isolated web control panel on http://{}", panel_addr);
+
+                let reloader: std::sync::Arc<dyn larva_php::panel::VHostReloader> =
+                    std::sync::Arc::new(RouterReloader {
+                        router: router.clone(),
+                    });
 
                 std::thread::spawn(move || {
                     // Each panel thread gets its own Tokio runtime — fully isolated
@@ -550,7 +634,10 @@ fn main() -> ExitCode {
                     };
 
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        rt.block_on(larva_php::panel::start(&panel_addr))
+                        rt.block_on(larva_php::panel::start_with_reloader(
+                            &panel_addr,
+                            Some(reloader),
+                        ))
                     }));
 
                     match result {
@@ -577,7 +664,7 @@ fn main() -> ExitCode {
         // Start HTTP server
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
-            if let Err(e) = server.start_server(addr).await {
+            if let Err(e) = larva_php::server::Server::serve(addr, router).await {
                 eprintln!("Server error: {}", e);
                 ExitCode::from(1)
             } else {

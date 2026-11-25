@@ -75,6 +75,10 @@ pub struct Server {
     pub idx: i32,
     pub configured_name: String,
     pub name: String,
+    /// Additional hostnames (aliases) that route to this virtual host, mirroring
+    /// Nginx `server_name` / Apache `ServerAlias` / LiteSpeed vhost aliases.
+    /// Supports exact names and `*.example.com` wildcards.
+    pub aliases: Vec<String>,
     pub root: String,
     pub split_path: Vec<String>,
     pub env: HashMap<String, String>,
@@ -174,6 +178,117 @@ impl RateLimiter {
     }
 }
 
+/// Registry + router for multiple virtual hosts sharing a single listener/port.
+///
+/// This is the multi-tenant equivalent of Nginx `server` blocks, Apache
+/// `<VirtualHost>`, LiteSpeed virtual hosts, and Caddy site blocks: one
+/// listening socket, many isolated document roots selected by the request's
+/// `Host` header. Each [`Server`] is a fully isolated vhost (own root, workers,
+/// php.ini, rate limiter). The router is hot-reloadable via [`replace_all`] /
+/// [`add`] / [`remove`] so the control panel can manage sites at runtime.
+pub struct VHostRouter {
+    vhosts: RwLock<Vec<Arc<Server>>>,
+}
+
+impl VHostRouter {
+    /// Create a router from a list of virtual hosts. The first entry is the
+    /// default vhost (used when no `Host` matches, mirroring Nginx
+    /// `default_server`).
+    pub fn new(vhosts: Vec<Arc<Server>>) -> Self {
+        Self {
+            vhosts: RwLock::new(vhosts),
+        }
+    }
+
+    /// Convenience constructor for the single-vhost (v1) case.
+    pub fn single(server: Arc<Server>) -> Self {
+        Self::new(vec![server])
+    }
+
+    /// Number of registered virtual hosts.
+    pub fn len(&self) -> usize {
+        self.vhosts.read().unwrap().len()
+    }
+
+    /// Whether no virtual hosts are registered.
+    pub fn is_empty(&self) -> bool {
+        self.vhosts.read().unwrap().is_empty()
+    }
+
+    /// Find the virtual host that matches `host` (a `Host` header value).
+    /// Returns `None` if no vhost matches.
+    pub fn find_vhost(&self, host: &str) -> Option<Arc<Server>> {
+        let vhosts = self.vhosts.read().unwrap();
+        vhosts.iter().find(|v| v.matches_host(host)).cloned()
+    }
+
+    /// The default virtual host (first registered), or `None` if empty.
+    pub fn default_vhost(&self) -> Option<Arc<Server>> {
+        self.vhosts.read().unwrap().first().cloned()
+    }
+
+    /// Snapshot of all registered virtual hosts.
+    pub fn list(&self) -> Vec<Arc<Server>> {
+        self.vhosts.read().unwrap().clone()
+    }
+
+    /// Replace the entire vhost set atomically (hot-reload).
+    pub fn replace_all(&self, vhosts: Vec<Arc<Server>>) {
+        *self.vhosts.write().unwrap() = vhosts;
+    }
+
+    /// Add (or replace by primary domain) a virtual host.
+    pub fn add(&self, server: Arc<Server>) {
+        let mut vhosts = self.vhosts.write().unwrap();
+        let domain = server.domain().to_ascii_lowercase();
+        vhosts.retain(|v| v.domain().to_ascii_lowercase() != domain);
+        vhosts.push(server);
+    }
+
+    /// Remove the virtual host whose primary domain or alias matches `domain`.
+    /// Returns true if a vhost was removed.
+    pub fn remove(&self, domain: &str) -> bool {
+        let mut vhosts = self.vhosts.write().unwrap();
+        let before = vhosts.len();
+        vhosts.retain(|v| !v.matches_host(domain));
+        vhosts.len() != before
+    }
+}
+
+impl Default for VHostRouter {
+    fn default() -> Self {
+        Self::new(Vec::new())
+    }
+}
+
+/// Parse a `--vhost` CLI spec into `(domain, root, aliases)`.
+///
+/// Format: `domain=root` or `domain=root;alias1,alias2` (Nginx/Apache
+/// ServerAlias-style). The `;`-separated aliases are optional.
+pub fn parse_vhost_spec(spec: &str) -> Result<(String, String, Vec<String>)> {
+    let (main, aliases_part) = match spec.split_once(';') {
+        Some((m, a)) => (m, Some(a)),
+        None => (spec, None),
+    };
+    let (domain, root) = main
+        .split_once('=')
+        .ok_or_else(|| Error::InvalidVhostSpec(spec.to_string()))?;
+    let domain = domain.trim().to_string();
+    let root = root.trim().to_string();
+    if domain.is_empty() || root.is_empty() {
+        return Err(Error::InvalidVhostSpec(spec.to_string()));
+    }
+    let aliases = aliases_part
+        .map(|a| {
+            a.split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok((domain, root, aliases))
+}
+
 impl Server {
     /// Create a new server with the given root directory.
     ///
@@ -191,6 +306,7 @@ impl Server {
             idx: -1,
             configured_name: String::new(),
             name: String::new(),
+            aliases: Vec::new(),
             root: abs_root,
             split_path: vec![".php".to_string()],
             env: HashMap::new(),
@@ -214,6 +330,7 @@ impl Server {
             idx: -1,
             configured_name: String::new(),
             name: String::new(),
+            aliases: Vec::new(),
             root: String::new(),
             split_path: vec![".php".to_string()],
             env: HashMap::new(),
@@ -241,6 +358,56 @@ impl Server {
     /// server serves these at `/.well-known/acme-challenge/<token>`.
     pub fn set_acme_challenge_dir(&mut self, dir: PathBuf) {
         self.acme_challenge_dir = Some(dir);
+    }
+
+    /// The primary domain name of this virtual host (Nginx `server_name`).
+    /// Falls back to `configured_name` when `name` is empty.
+    pub fn domain(&self) -> &str {
+        if self.name.is_empty() {
+            &self.configured_name
+        } else {
+            &self.name
+        }
+    }
+
+    /// Set the primary domain and aliases for this virtual host.
+    pub fn set_domains(&mut self, primary: String, aliases: Vec<String>) {
+        self.name = primary;
+        self.aliases = aliases;
+    }
+
+    /// Returns true if `host` (a `Host` header value, with or without port)
+    /// routes to this virtual host. Matching is case-insensitive and supports
+    /// `*.example.com` wildcard aliases (Apache/LiteSpeed/Nginx compatible).
+    pub fn matches_host(&self, host: &str) -> bool {
+        let host = host.trim();
+        // Strip the port (e.g. "example.com:8080" -> "example.com").
+        let host = match host.rsplit_once(':') {
+            Some((h, p)) if p.chars().all(|c| c.is_ascii_digit()) && !h.contains(':') => h,
+            _ => host,
+        }
+        .to_ascii_lowercase();
+
+        let candidates = std::iter::once(self.domain())
+            .chain(self.aliases.iter().map(|s| s.as_str()));
+        for cand in candidates {
+            let cand = cand.trim().to_ascii_lowercase();
+            if cand.is_empty() {
+                continue;
+            }
+            if let Some(suffix) = cand.strip_prefix("*.") {
+                // Wildcard: matches exactly one label (e.g. *.example.com
+                // matches foo.example.com but not a.b.example.com).
+                if let Some(found) = host.strip_suffix(&format!(".{}", suffix)) {
+                    if !found.is_empty() && !found.contains('.') {
+                        return true;
+                    }
+                }
+            } else if host == cand {
+                return true;
+            }
+        }
+        false
     }
 
     /// Find a worker whose request matcher matches the given request.
@@ -780,13 +947,23 @@ impl Server {
     }
 
     /// Start the HTTP server listening on the given address.
-    pub async fn start_server(&self, addr: SocketAddr) -> Result<()> {
-        self.activate();
+    /// Serve HTTP on a single shared listener, routing each request to the
+    /// virtual host that matches its `Host` header (multi-tenant, like Nginx
+    /// `server` blocks / Apache `<VirtualHost>` / LiteSpeed vhosts). One port,
+    /// many isolated document roots.
+    pub async fn serve(addr: SocketAddr, vhosts: Arc<VHostRouter>) -> Result<()> {
+        for v in vhosts.list() {
+            v.activate();
+        }
 
         let listener = TcpListener::bind(addr)
             .await
             .map_err(|e| Error::Io(e))?;
-        info!("LarvaPHP server listening on http://{}", addr);
+        info!(
+            "LarvaPHP server listening on http://{} ({} virtual host(s))",
+            addr,
+            vhosts.len()
+        );
 
         // Dual-stack: also listen on the IPv6 equivalent of an IPv4 bind so
         // `localhost` works. On Windows `localhost` resolves to `::1` first,
@@ -805,12 +982,6 @@ impl Server {
             },
             None => None,
         };
-        let server_root = self.root.clone();
-        let server_split_path = self.split_path.clone();
-        // Snapshot worker matchers and php.ini once (Flyweight: shared via Arc).
-        let server_workers: Arc<Vec<Arc<Worker>>> =
-            Arc::new(self.workers_with_request_matcher.read().unwrap().clone());
-        let server_php_ini: Arc<HashMap<String, String>> = Arc::new(self.php_ini.clone());
 
         loop {
             // Accept from either the IPv4 or IPv6 listener (whichever fires).
@@ -830,13 +1001,7 @@ impl Server {
             let (stream, _) = accepted.map_err(|e| Error::Io(e))?;
             let peer_addr = stream.peer_addr().map_err(|e| Error::Io(e))?;
 
-            let root = server_root.clone();
-            let split_path = server_split_path.clone();
-            let registered = self.is_registered.load(Ordering::Acquire);
-            let rate_limiter = self.rate_limiter.clone();
-            let max_body_size = self.max_body_size;
-            let workers = server_workers.clone();
-            let php_ini = server_php_ini.clone();
+            let vhosts = vhosts.clone();
 
             tokio::spawn(async move {
                 let io = TokioIo::new(stream);
@@ -844,16 +1009,32 @@ impl Server {
                     .serve_connection(
                         io,
                         service_fn(move |req: Request<IncomingBody>| {
-                            let root = root.clone();
-                            let split_path = split_path.clone();
-                            let registered = registered.clone();
-                            let rate_limiter = rate_limiter.clone();
-                            let max_body_size = max_body_size;
-                            let workers = workers.clone();
-                            let php_ini = php_ini.clone();
+                            let vhosts = vhosts.clone();
                             let client_ip = peer_addr.ip().to_string();
                             async move {
-                                if !registered {
+                                // Resolve the virtual host by Host header
+                                // (HTTP/1.1 and HTTP/2 both carry it). Falls back
+                                // to the default vhost when nothing matches.
+                                let host = req
+                                    .headers()
+                                    .get("host")
+                                    .and_then(|v| v.to_str().ok())
+                                    .unwrap_or("");
+                                let vhost = vhosts
+                                    .find_vhost(host)
+                                    .or_else(|| vhosts.default_vhost());
+                                let Some(vhost) = vhost else {
+                                    return Ok::<Response<Full<Bytes>>, hyper::Error>(
+                                        Response::builder()
+                                            .status(StatusCode::NOT_FOUND)
+                                            .header("server", "LarvaPHP")
+                                            .body(Full::new(Bytes::from(
+                                                "No virtual host for this Host",
+                                            )))
+                                            .unwrap(),
+                                    );
+                                };
+                                if !vhost.is_registered() {
                                     return Ok::<Response<Full<Bytes>>, hyper::Error>(
                                         Response::builder()
                                             .status(StatusCode::SERVICE_UNAVAILABLE)
@@ -861,6 +1042,19 @@ impl Server {
                                             .unwrap(),
                                     );
                                 }
+
+                                // Per-vhost configuration (isolation): each site
+                                // has its own root, workers, php.ini, rate limiter.
+                                let root = vhost.root.clone();
+                                let split_path = vhost.split_path.clone();
+                                let rate_limiter = vhost.rate_limiter.clone();
+                                let max_body_size = vhost.max_body_size;
+                                let workers: Vec<Arc<Worker>> = vhost
+                                    .workers_with_request_matcher
+                                    .read()
+                                    .unwrap()
+                                    .clone();
+                                let php_ini = vhost.php_ini.clone();
 
                                 let uri = req.uri().to_string();
 
@@ -2581,5 +2775,132 @@ mod tests {
         assert!(result.is_ok());
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // === Virtual host (multi-tenant) tests ===
+
+    fn vhost(root: &str, name: &str, aliases: &[&str]) -> Arc<Server> {
+        let mut s = Server::new(root).unwrap();
+        s.set_domains(
+            name.to_string(),
+            aliases.iter().map(|a| a.to_string()).collect(),
+        );
+        s.activate();
+        Arc::new(s)
+    }
+
+    #[test]
+    fn vhost_matches_primary_domain() {
+        let v = vhost(".", "example.com", &[]);
+        assert!(v.matches_host("example.com"));
+        assert!(v.matches_host("example.com:8080"));
+        assert!(v.matches_host("EXAMPLE.COM"));
+        assert!(!v.matches_host("other.com"));
+    }
+
+    #[test]
+    fn vhost_matches_aliases() {
+        let v = vhost(".", "example.com", &["www.example.com", "example.net"]);
+        assert!(v.matches_host("www.example.com"));
+        assert!(v.matches_host("example.net"));
+        assert!(!v.matches_host("example.org"));
+    }
+
+    #[test]
+    fn vhost_wildcard_alias() {
+        // Primary is a different domain so only the wildcard can match example.com.
+        let v = vhost(".", "test.org", &["*.example.com"]);
+        assert!(v.matches_host("foo.example.com"));
+        assert!(v.matches_host("bar.example.com"));
+        // Wildcard matches exactly one label.
+        assert!(!v.matches_host("a.b.example.com"));
+        assert!(!v.matches_host("example.com"));
+    }
+
+    #[test]
+    fn vhost_domain_falls_back_to_configured_name() {
+        let s = Server::new(".").unwrap();
+        // name is empty by default; domain() falls back to configured_name.
+        assert_eq!(s.domain(), s.configured_name);
+    }
+
+    #[test]
+    fn parse_vhost_spec_basic() {
+        let (d, r, a) = parse_vhost_spec("example.com=/var/www/example").unwrap();
+        assert_eq!(d, "example.com");
+        assert_eq!(r, "/var/www/example");
+        assert!(a.is_empty());
+    }
+
+    #[test]
+    fn parse_vhost_spec_with_aliases() {
+        let (d, r, a) =
+            parse_vhost_spec("example.com=/var/www/example;www.example.com,example.net")
+                .unwrap();
+        assert_eq!(d, "example.com");
+        assert_eq!(r, "/var/www/example");
+        assert_eq!(a, vec!["www.example.com", "example.net"]);
+    }
+
+    #[test]
+    fn parse_vhost_spec_invalid() {
+        assert!(parse_vhost_spec("no-equals-sign").is_err());
+        assert!(parse_vhost_spec("=root").is_err());
+        assert!(parse_vhost_spec("domain=").is_err());
+    }
+
+    #[test]
+    fn vhost_router_find_by_host() {
+        let a = vhost(".", "a.com", &[]);
+        let b = vhost(".", "b.com", &["www.b.com"]);
+        let router = VHostRouter::new(vec![a.clone(), b.clone()]);
+        assert_eq!(router.find_vhost("a.com").unwrap().domain(), "a.com");
+        assert_eq!(router.find_vhost("www.b.com").unwrap().domain(), "b.com");
+        assert!(router.find_vhost("unknown.com").is_none());
+    }
+
+    #[test]
+    fn vhost_router_default_is_first() {
+        let a = vhost(".", "a.com", &[]);
+        let b = vhost(".", "b.com", &[]);
+        let router = VHostRouter::new(vec![a.clone(), b.clone()]);
+        assert_eq!(router.default_vhost().unwrap().domain(), "a.com");
+    }
+
+    #[test]
+    fn vhost_router_add_replaces_by_domain() {
+        let router = VHostRouter::new(vec![vhost(".", "a.com", &[])]);
+        assert_eq!(router.len(), 1);
+        router.add(vhost(".", "a.com", &["new.a.com"]));
+        assert_eq!(router.len(), 1);
+        assert!(router.find_vhost("new.a.com").is_some());
+    }
+
+    #[test]
+    fn vhost_router_remove() {
+        let router = VHostRouter::new(vec![
+            vhost(".", "a.com", &[]),
+            vhost(".", "b.com", &[]),
+        ]);
+        assert!(router.remove("a.com"));
+        assert_eq!(router.len(), 1);
+        assert!(router.find_vhost("a.com").is_none());
+        assert!(router.find_vhost("b.com").is_some());
+    }
+
+    #[test]
+    fn vhost_router_hot_reload_replace_all() {
+        let router = VHostRouter::new(vec![vhost(".", "a.com", &[])]);
+        router.replace_all(vec![vhost(".", "x.com", &[]), vhost(".", "y.com", &[])]);
+        assert_eq!(router.len(), 2);
+        assert!(router.find_vhost("a.com").is_none());
+        assert!(router.find_vhost("x.com").is_some());
+    }
+
+    #[test]
+    fn vhost_router_empty_default_none() {
+        let router = VHostRouter::new(vec![]);
+        assert!(router.default_vhost().is_none());
+        assert!(router.is_empty());
     }
 }

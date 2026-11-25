@@ -22,6 +22,8 @@ use crate::api::{
 #[derive(Clone)]
 pub struct PanelState {
     pub db: PanelDb,
+    /// Optional hot-reload callback into the live server's vhost router.
+    pub reloader: Option<std::sync::Arc<dyn crate::VHostReloader>>,
 }
 
 /// Query params for file listing.
@@ -32,8 +34,56 @@ pub struct FileQuery {
 }
 
 impl PanelState {
-    pub fn new(db: PanelDb) -> Self {
-        Self { db }
+    pub fn new(db: PanelDb, reloader: Option<std::sync::Arc<dyn crate::VHostReloader>>) -> Self {
+        Self { db, reloader }
+    }
+
+    /// Rebuild the live vhost routing table from the current website list.
+    /// Called after any website create/update/delete so the main server
+    /// immediately serves the new site set on the shared port.
+    fn reload_vhosts(&self) {
+        if let Some(reloader) = &self.reloader {
+            let websites = self.list_websites_sync();
+            reloader.reload(websites);
+        }
+    }
+
+    /// Synchronous read of all websites (for the reload callback).
+    fn list_websites_sync(&self) -> Vec<Website> {
+        let conn = self.db.inner.lock().unwrap();
+        let mut stmt = match conn.prepare(
+            "SELECT id, name, domain, document_root, php_version, ssl_enabled, ssl_cert_path, ssl_key_path, acme_email, acme_domains, worker_count, is_active, created_at, updated_at FROM websites ORDER BY created_at ASC"
+        ) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        let rows = stmt.query_map([], |r| {
+            Ok(Website {
+                id: r.get(0)?,
+                name: r.get(1)?,
+                domain: r.get(2)?,
+                document_root: r.get(3)?,
+                php_version: r.get(4)?,
+                ssl_enabled: r.get::<_, i64>(5)? != 0,
+                ssl_cert_path: r.get(6)?,
+                ssl_key_path: r.get(7)?,
+                acme_email: r.get(8)?,
+                acme_domains: r.get(9)?,
+                worker_count: r.get::<_, i64>(10)? as u32,
+                is_active: r.get::<_, i64>(11)? != 0,
+                created_at: r.get(12)?,
+                updated_at: r.get(13)?,
+            })
+        });
+        let mut out = Vec::new();
+        if let Ok(rows) = rows {
+            for row in rows {
+                if let Ok(w) = row {
+                    out.push(w);
+                }
+            }
+        }
+        out
     }
 
     pub fn router(self) -> Router {
@@ -148,8 +198,9 @@ async fn create_website(
     let now = now_iso();
     let php_version = payload.php_version.clone().unwrap_or_else(|| "8.3".into());
     let worker_count = payload.worker_count.unwrap_or(1);
+    let db = state.db.clone();
     let result: Result<_, rusqlite::Error> = (move || {
-        let conn = state.db.inner.lock().unwrap();
+        let conn = db.inner.lock().unwrap();
         conn.execute(
             "INSERT INTO websites (id, name, domain, document_root, php_version, ssl_enabled, acme_email, acme_domains, worker_count, is_active, created_at, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
@@ -186,7 +237,10 @@ async fn create_website(
         })
     })();
     match result {
-        Ok(w) => api_json(w),
+        Ok(w) => {
+            state.reload_vhosts();
+            api_json(w)
+        }
         Err(e) => api_err(&format!("create website: {}", e)),
     }
 }
@@ -229,8 +283,9 @@ async fn update_website(
     Path(id): Path<String>,
     Json(payload): Json<UpdateWebsite>,
 ) -> Json<ApiResponse<Website>> {
+    let db = state.db.clone();
     let result: Result<_, rusqlite::Error> = (move || {
-        let conn = state.db.inner.lock().unwrap();
+        let conn = db.inner.lock().unwrap();
         let now = now_iso();
         let id_clone = id.clone();
         conn.execute(
@@ -285,7 +340,10 @@ async fn update_website(
         )
     })();
     match result {
-        Ok(w) => api_json(w),
+        Ok(w) => {
+            state.reload_vhosts();
+            api_json(w)
+        }
         Err(e) => api_err(&format!("update website: {}", e)),
     }
 }
@@ -294,13 +352,17 @@ async fn delete_website(
     State(state): State<PanelState>,
     Path(id): Path<String>,
 ) -> Json<ApiResponse<()>> {
+    let db = state.db.clone();
     let result: Result<_, rusqlite::Error> = (move || {
-        let conn = state.db.inner.lock().unwrap();
+        let conn = db.inner.lock().unwrap();
         conn.execute("DELETE FROM websites WHERE id = ?1", rusqlite::params![id])?;
         Ok(())
     })();
     match result {
-        Ok(()) => api_json(()),
+        Ok(()) => {
+            state.reload_vhosts();
+            api_json(())
+        }
         Err(e) => api_err(&format!("delete website: {}", e)),
     }
 }

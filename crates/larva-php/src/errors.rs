@@ -79,6 +79,9 @@ pub enum Error {
     #[error("invalid request path")]
     InvalidRequestPath,
 
+    #[error("invalid --vhost spec: {0:?} (expected DOMAIN=ROOT[;ALIAS,...])")]
+    InvalidVhostSpec(String),
+
     #[error("invalid script path")]
     InvalidScriptPath,
 
