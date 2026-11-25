@@ -502,7 +502,7 @@ impl Server {
             }
             // No robots.txt on disk — serve a permissive default
             // so WordPress doesn't try to generate one.
-            let default = b"User-agent: *\nDisallow: /\n";
+            let default = b"User-agent: *\nAllow: /\n";
             return Ok(Response::builder()
                 .status(StatusCode::OK)
                 .header("content-type", "text/plain; charset=UTF-8")
@@ -653,7 +653,7 @@ impl Server {
                     ));
                 }
             }
-            let default = b"User-agent: *\nDisallow: /\n".to_vec();
+            let default = b"User-agent: *\nAllow: /\n".to_vec();
             return Ok((
                 StatusCode::OK,
                 vec![
@@ -1052,7 +1052,7 @@ impl Server {
             }
             // No robots.txt on disk — serve a permissive default
             // so WordPress doesn't try to generate one.
-            let default = b"User-agent: *\nDisallow: /\n";
+            let default = b"User-agent: *\nAllow: /\n";
             return Ok::<Response<Full<Bytes>>, hyper::Error>(
                 Response::builder()
                     .status(StatusCode::OK)
@@ -1084,7 +1084,7 @@ impl Server {
             }
             // No robots.txt on disk — serve a permissive default
             // so WordPress doesn't try to generate one.
-            let default = b"User-agent: *\nDisallow: /\n";
+            let default = b"User-agent: *\nAllow: /\n";
             return Ok::<Response<Full<Bytes>>, hyper::Error>(
                 Response::builder()
                     .status(StatusCode::OK)
