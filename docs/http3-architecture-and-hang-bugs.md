@@ -1,0 +1,373 @@
+# HTTP/3 trong LarvaPHP: kiến trúc, bug treo request và cách phòng tránh
+
+Tài liệu này mô tả cách LarvaPHP (fork của FrankenPHP, branch `v1`) triển khai HTTP/3/QUIC, vì sao một request có thể treo rất lâu (biểu hiện: Waterfox báo "waiting", có khi hàng chục phút), cách đã sửa và cách rollback an toàn.
+
+Số liệu đo thực tế tại thời điểm viết (2026-11-25, `https://nghesachxua.vn/`):
+
+| Đối tượng | Kết quả |
+| --- | --- |
+| `curl --http2` | `HTTP/2 200`, TTFB thường `0,05–0,25s` |
+| `curl --http1.1` | `200`, HTTP/1.1 |
+| Asset tĩnh / edge cache | `x-larva-edge-cache: HIT`, TTFB thường `< 0,15s` |
+| Cert | `CN=nghesachxua.vn`, Let's Encrypt, `openssl verify` trả `0 (ok)` |
+| TCP 80/443 | do tiến trình `larva-php` lắng nghe |
+| UDP 443 | vẫn mở, nhưng **không còn được quảng cáo** cho browser mới |
+
+Kết luận: PHP, static file, edge cache, TLS và mạng TCP đều nhanh. Thời gian treo nằm ở **đường vào HTTP/3 (QUIC)** và cơ chế fallback của browser sau khi đọc `Alt-Svc`.
+
+---
+
+## 1. Kiến trúc HTTP/3
+
+### 1.1. Hai transport dùng chung một core
+
+```text
+                    ┌──────────────────────────────────────────────┐
+  Browser           │ TCP :80/:443          UDP :443               │
+  (Alt-Svc: h3) ───►│ hyper (H1/H2)         quiche + h3 (H3)       │
+                    │        │                    │                 │
+                    │        ▼                    ▼                 │
+                    │   Server::handle_request_parts()  ← core      │
+                    │   (static / edge cache / PHP CGI)             │
+                    └──────────────────────────────────────────────┘
+```
+
+- `crates/larva-php/src/http3.rs`: phần QUIC/h3, chỉ biên dịch khi bật feature `http3`.
+- `crates/larva-php/src/server.rs`: core xử lý chung cho H1/H2/H3.
+- `crates/larva-php/src/main.rs`: khởi tạo listener. Điều kiện vẫn là `args.http3 || args.lets_encrypt` để giữ tương thích, nhưng **chỉ gọi `set_http3_port()` khi có `--http3`**.
+
+Hệ quả sau bản sửa:
+
+- `--lets-encrypt` (production hiện tại): UDP listener vẫn chạy, nhưng **không gửi** `Alt-Svc: h3`.
+- `--http3`: bật UDP listener **và** quảng cáo `Alt-Svc: h3=":443"; ma=86400`.
+
+### 1.2. Thread model
+
+`Http3Server::run()` chạy trên một thread riêng và là nơi duy nhất được chạm vào `quiche::Connection` / `h3::Connection`.
+
+| Thành phần | Vai trò |
+| --- | --- |
+| `UdpSocket` | Nhận/gửi datagram; timeout đọc `100ms` |
+| `clients: HashMap<Vec<u8>, Client>` | Mọi kết nối QUIC đang theo dõi, key là DCID |
+| `Client { conn, http3_conn, partial_responses }` | Trạng thái quiche + h3 + response bị flow-control chặn |
+| `job_tx / job_rx` | `crossbeam::channel::bounded`, tối đa `256` job |
+| `result_tx / result_rx` | `crossbeam::channel::unbounded`, trả `CompletedRequest` về listener |
+| Worker threads | `num_cpus::get().clamp(2, 8)` luồng, gọi `Server::handle_request_parts()` |
+
+Hằng số quan trọng:
+
+| Hằng | Giá trị | Ý nghĩa |
+| --- | --- | --- |
+| `MAX_DATAGRAM_SIZE` | 1350 byte | Tránh IP fragmentation |
+| `TIMER_TICK` | 100 ms | Nhịp wall-clock chạy `conn.on_timeout()` |
+| `MAX_CLIENTS` | 4096 | Giới hạn kết nối QUIC đang theo dõi |
+| `REQUEST_QUEUE_CAP` | 256 | Giới hạn request chờ worker |
+| QUIC idle timeout | 30.000 ms | Browser có thể chờ ~30s trước khi fallback |
+
+### 1.3. Vòng đời một request HTTP/3
+
+1. `recv_from()` nhận datagram.
+2. Nếu là `Initial` và connection chưa tồn tại → `quiche::accept()`, lưu vào `clients[scid]`.
+3. `conn.recv()` → khi established, tạo `h3::Connection`.
+4. `h3c.poll()` nhận `Event::Headers` → `handle_request()`.
+5. `handle_request()` shutdown chiều đọc stream, tách `:method`, `:path`, header, đóng gói `PendingRequest` và `try_send()` vào `job_tx`. Nếu queue đầy → trả `503` ngay.
+6. Worker gọi `server.handle_request_parts(...)`, gửi `CompletedRequest` qua `result_tx`.
+7. **Listener thread** gọi `drain_completed_results()` trên mỗi lần lặp, ghi response vào quiche stream.
+8. `flush_writable_streams()` tiếp tục các response bị `StreamBlocked`.
+9. `send_pending()` đổ datagram ra socket và dọn connection đã đóng.
+
+Nguyên tắc cốt lõi: **listener không chạy PHP; worker không chạm quiche.**
+
+---
+
+## 2. BUG-01: response chỉ được lấy khỏi channel khi có datagram mới
+
+### Triệu chứng
+
+- Browser đã upgrade sang H3 qua `Alt-Svc` thì tải rất lâu, có request đứng ở trạng thái pending ~27s.
+- `curl` HTTP/1.1/HTTP/2 vẫn `200` trong ~0,1s.
+- Restart server chỉ tốt vài request đầu, rồi treo lại khi browser giữ connection H3.
+
+### Code cũ (rút gọn)
+
+```rust
+loop {
+    let (len, from) = match socket.recv_from(&mut buf) {
+        Ok(v) => v,
+        Err(WouldBlock | TimedOut) => {
+            for c in clients.values_mut() { c.conn.on_timeout(); }
+            send_pending(&socket, &mut clients, &mut out);
+            continue;                       // ◄── KHÔNG đọc result_rx ở đây
+        }
+        ...
+    };
+
+    ... xử lý datagram, h3.poll(), handle_request() ...
+
+    while let Ok(done) = result_rx.try_recv() {   // ◄── CHỈ ở đây
+        send_h3_response(...);
+    }
+    send_pending(...);
+}
+```
+
+### Nguyên nhân
+
+Worker đã xong và gửi `CompletedRequest` vào `result_tx`, nhưng listener đang ở nhánh timeout của `recv_from()` rồi `continue`. Không có datagram mới nên `result_rx` không bao giờ được drain. Client thì đang chờ response nên không gửi thêm gói → deadlock kinh điển giữa event loop và worker channel.
+
+```text
+T+0ms    Browser gửi H3 GET / qua UDP
+T+2ms    Worker nhận job, chạy PHP (~60ms)
+T+62ms   Worker gửi CompletedRequest vào result_tx
+T+62ms   Server chờ recv_from() → timeout → continue (result nằm trong queue)
+T+162ms  Lại timeout → continue (vẫn chưa drain)
+T+30s    QUIC idle timeout / browser fallback sang TCP
+T+...    Lặp lại cho từng stream → tổng thời gian bị nhân lên
+```
+
+### Cách sửa (đã áp dụng)
+
+Trích hai helper và gọi ở **mọi nhánh** của vòng lặp:
+
+```rust
+fn drain_completed_results(
+    clients: &mut HashMap<Vec<u8>, Client>,
+    result_rx: &Receiver<CompletedRequest>,
+) { ... }
+
+fn flush_writable_streams(clients: &mut HashMap<Vec<u8>, Client>) { ... }
+```
+
+Gọi tại:
+
+- đầu vòng lặp (trước `recv_from()`),
+- nhánh timeout **trước `continue`**,
+- sau khi xử lý datagram.
+
+Sau mỗi lần drain/flush luôn gọi `send_pending()` để đẩy UDP ngay. Ngoài ra:
+
+- `on_timeout()` chạy theo `Instant` + `TIMER_TICK`, không còn phụ thuộc vào `recv_from()` timeout.
+- PHP/static file chuyển sang worker threads; event loop không bị một request chậm chặn toàn bộ process.
+- Response bị bỏ rơi (client đã đóng / `http3_conn` None) được log rõ ràng.
+- Queue full trả `503` thay vì âm thầm drop.
+
+---
+
+## 3. Bằng chứng từ Chrome thật
+
+Môi trường: `google-chrome-stable 158.0.8127.88`, headless + CDP, profile sạch. Script đo nằm ở `/tmp/opencode/browser_test.py` và `/tmp/opencode/lcp_test.py` (không nằm trong repo).
+
+### 3.1. Binary cũ – load bình thường
+
+```text
+WALL TIME: 9.93s
+REQUESTS: 12
+protocols: h2 x11, h3 x1
+document: h2, 0.095s
+```
+
+Lần load ấm:
+
+```text
+WALL TIME: 3.57s
+document: h2, 0.093s
+assets: ~0,1s
+x-larva-edge-cache: HIT
+```
+
+### 3.2. Binary cũ – ép H3 (`--disable-http2 --enable-quic`)
+
+```text
+WALL TIME: 30.22s
+protocols: http/1.1 x10, h3 x2
+2 asset JS: ~26.8s
+```
+
+Netlog `/tmp/opencode/netlog.json` cho thấy:
+
+- Chrome nhận `Alt-Svc: h3=":443"; ma=86400`.
+- QUIC handshake thành công, cert verified.
+- H3 GET gửi lúc ~`51.009s` trên stream `0` và `4`.
+- Server ACK gói nhưng **không gửi response headers**.
+- Chrome gửi `RST_STREAM` ~`51.021s`.
+- Kết thúc: `No recent network activity after 29017571us. Timeout:29s`.
+
+Đây chính là BUG-01.
+
+### 3.3. Biện pháp chặn tạm (trước khi có binary sửa)
+
+Rule nft tạm:
+
+```text
+table inet larva_temp_http3
+  udp dport 443 reject with icmp port-unreachable
+```
+
+Kết quả đo lại với điều kiện ép H3:
+
+```text
+WALL TIME: 3.66s | loadEventFired: yes
+REQUESTS: 12 | protocols: http/1.1 x12
+DOC: 200, http/1.1, 0.073s
+Slowest: 0.48s (ảnh external)
+```
+
+HTTPS TCP không bị ảnh hưởng; browser đã cache `Alt-Svc` fail QUIC rất nhanh rồi fallback sang TCP.
+
+### 3.4. Sau khi deploy binary đã sửa
+
+- Build đúng feature: `embedded,http3,acme,mercure,tls`.
+  - Lần đầu thiếu `tls` → lỗi `cannot find tls in larva_php` vì `pub mod tls` nằm sau `#[cfg(feature = "tls")]`.
+- Backup binary cũ: `/usr/local/bin/larva-php.bak-20261125-143820`.
+- Restart qua `larva-php@nghesachxua.service`.
+- Log service xác nhận:
+
+```text
+HTTP/3 listener active but Alt-Svc advertisement disabled; TCP clients use h2/http/1.1
+HTTP/3 (QUIC) listening on 0.0.0.0:443
+```
+
+Kiểm tra header:
+
+```bash
+curl -sSI https://nghesachxua.vn/ | grep -iE 'HTTP/|server:|alt-svc'
+# HTTP/2 200
+# server: LarvaPHP
+# (không có alt-svc)
+```
+
+ALPN và fallback:
+
+```bash
+openssl s_client -alpn h2       -connect nghesachxua.vn:443  # ALPN protocol: h2
+openssl s_client -alpn http/1.1 -connect nghesachxua.vn:443  # ALPN protocol: http/1.1
+curl --http2   -I https://nghesachxua.vn/  # 200
+curl --http1.1 -I https://nghesachxua.vn/  # 200
+```
+
+Rule nft tạm vẫn được giữ làm safety net cho browser đã cache `Alt-Svc` từ bản cũ. Có thể gỡ sau khi chắc chắn mọi client đã hết cache:
+
+```bash
+nft delete table inet larva_temp_http3
+```
+
+---
+
+## 4. Vì sao không "đọc header request để chọn HTTP version"
+
+Phiên bản HTTP không nằm trong request header thông thường và không đổi được sau khi connection established:
+
+- Với HTTPS, browser và server thương lượng trong TLS **ALPN** trước khi gửi request đầu tiên:
+  `h2` → HTTP/2, `http/1.1` → HTTP/1.1.
+- Với HTTP/3, ALPN là `h3` trên QUIC/UDP. Browser chỉ biết có H3 nhờ `Alt-Svc` từ một response TCP trước đó.
+- HTTP/1.1 không có header "version". HTTP/2/3 dùng pseudo-header (`:method`, `:scheme`, `:authority`, `:path`) nhưng **không có** `:version` dùng để thương lượng. Chính framing của request xác định phiên bản.
+- `Upgrade: h2c` chỉ áp dụng cho HTTP/1.1 cleartext; browser HTTPS không dùng.
+
+Cách adapt đúng: giữ ALPN `h2, http/1.1`, chỉ gửi `Alt-Svc: h3` khi operator bật rõ `--http3`. Browser hỗ trợ h2 dùng h2; browser không hỗ trợ h2 tự dùng http/1.1.
+
+---
+
+## 5. Các rủi ro đã biết nhưng chưa sửa trong commit này
+
+Các mục dưới đây được ghi lại để tránh tưởng rằng bản sửa đã làm hết mọi thứ.
+
+| ID | Vấn đề | Trạng thái |
+| --- | --- | --- |
+| BUG-02 | Client đã đóng khi response xong → response bị drop | **Đã log** (`drain_completed_results`), vẫn chưa đóng stream bằng reset |
+| BUG-03 | `result_tx` là unbounded | Chưa đổi; đã có log và `MAX_CLIENTS` nhưng vẫn cần bounded/drop có chủ đích |
+| BUG-04 | H3 dùng `Server::new()` riêng, không chia `Arc<Server>` với TCP | Chưa sửa; cache/php_ini giữa H1/H2 và H3 chưa dùng chung |
+| BUG-05 | `:authority` chưa được dịch sang `host` | Chưa sửa; có thể làm WordPress thấy `SERVER_NAME=localhost` khi thử H3 thật |
+| BUG-06 | Request body truyền `&[]` cho worker | Chưa sửa; POST/PUT qua H3 chưa đúng |
+| BUG-07 | `SERVER_PROTOCOL` hardcode `HTTP/1.1` | Chưa sửa; chỉ ảnh hưởng log/env PHP |
+| BUG-08 | `on_timeout()`/`send_pending()` duyệt toàn bộ client | Chưa tối ưu; có `MAX_CLIENTS` làm trần |
+| BUG-09 | Worker panic → job mất, stream treo | Chưa có `catch_unwind`/timeout |
+| BUG-11 | Cert ACME không reload trong H3 | Chưa sửa; cần restart sau renewal hoặc rebuild `quiche::Config` |
+
+Vì các rủi ro trên, production hiện tại **chủ động không quảng cáo H3**. H3 vẫn có thể bật rõ bằng `--http3` để test có kiểm soát.
+
+---
+
+## 6. Invariant khi sửa HTTP/3
+
+1. Chỉ listener thread được chạm `quiche::Connection` và `h3::Connection`.
+2. Timer chạy theo wall-clock (`Instant` + `TIMER_TICK`), không gắn vào `recv_from()`.
+3. Mọi channel có đường ra trên mỗi lần lặp, kể cả khi client im lặng.
+4. Mọi stream phải kết thúc bằng `fin=true` hoặc reset; không im lặng ở `Err(_) => return`.
+5. `client_key` phải ổn định trong suốt connection (hiện dùng DCID + `set_disable_active_migration(true)`).
+6. Không chạy PHP/đọc file trong event loop.
+7. H3 và TCP nên chia sẻ cùng `Arc<Server>` (việc này còn phải làm).
+8. Pseudo-header H3 phải được dịch sang CGI env (`:authority` → `host`, `:scheme` → HTTPS) và body phải được truyền cho worker.
+9. Bound mọi thứ: clients, queue, result channel, partial responses.
+10. Log mọi response bị bỏ rơi — im lặng là lý do bug tồn tại lâu.
+
+---
+
+## 7. Deploy, kiểm tra và rollback
+
+### Build
+
+```bash
+export PHP_LIB_DIR=/usr/lib
+export PHP_EMBED_LIB=php8.3
+export PHP_INCLUDES="$(php-config --includes)"
+
+cargo build --release -p larva-php --bin larva-php \
+  --features embedded,http3,acme,mercure,tls
+```
+
+Feature `tls` là bắt buộc nếu binary có `--tls`/`--lets-encrypt`; thiếu feature này sẽ lỗi `cannot find tls in larva_php`.
+
+### Deploy có rollback
+
+```bash
+STAMP=$(date +%Y%m%d-%H%M%S)
+cp -a /usr/local/bin/larva-php /usr/local/bin/larva-php.bak-$STAMP
+install -o root -g root -m 0755 target/release/larva-php /usr/local/bin/larva-php
+systemctl restart larva-php@nghesachxua.service
+```
+
+Backup thực tế của lần này:
+
+```text
+/usr/local/bin/larva-php.bak-20261125-143820
+```
+
+Rollback nếu có sự cố:
+
+```bash
+cp -a /usr/local/bin/larva-php.bak-20261125-143820 /usr/local/bin/larva-php
+systemctl restart larva-php@nghesachxua.service
+```
+
+### Kiểm tra sau deploy
+
+```bash
+systemctl is-active larva-php@nghesachxua.service
+curl -sSI https://nghesachxua.vn/ | grep -iE 'HTTP/|server:|alt-svc|x-larva-edge-cache'
+curl --http2   -sS -o /dev/null -w 'h2=%{http_code} %{http_version}\n' https://nghesachxua.vn/
+curl --http1.1 -sS -o /dev/null -w 'h1=%{http_code} %{http_version}\n' https://nghesachxua.vn/
+journalctl -u larva-php@nghesachxua -n 50 --no-pager
+```
+
+Kỳ vọng:
+
+- service `active`,
+- `HTTP/2 200`,
+- `server: LarvaPHP`,
+- **không có** `alt-svc`,
+- `--http1.1` cũng trả `200`,
+- log có dòng `Alt-Svc advertisement disabled`.
+
+Khi test H3 có chủ đích, dùng một instance riêng với `--http3` và kiểm tra Chrome DevTools → Network → Protocol là `h3`; không kỳ vọng production đang dùng h3.
+
+---
+
+## 8. Tóm tắt một câu
+
+Server không chậm; **luồng HTTP/3 chỉ gửi response khi nhận thêm gói từ client, trong khi client đang chờ response**. Sửa bằng cách drain/ghi/flush result trên mọi lần lặp, chạy timer theo wall-clock, đưa PHP sang worker, và chỉ quảng cáo `Alt-Svc: h3` khi operator bật rõ `--http3`.
+
+---
+
+## 9. Phạm vi thay đổi ngoài repo này
+
+Tối ưu LCP/Network dependency tree cho `nghesachxua.vn` (`fetchpriority="high"`, preload ảnh + `scroll.js`, defer `scroll.js`, preconnect `images.unsplash.com`) nằm ở document root WordPress `/home/nghesachxua/nghesachxua.vn`, **không nằm trong repo `larvaphp`** và không được commit cùng 2 commit dưới đây.
