@@ -496,7 +496,10 @@ impl Server {
                         .header("content-type", "text/plain; charset=UTF-8")
                         .header("content-length", content.len().to_string())
                         .header("server", "LarvaPHP")
-                        .body(Full::new(Bytes::from(content)))
+                        .body(Full::new(body_for_head(
+                            req.method().as_str(),
+                            Bytes::from(content),
+                        )))
                         .unwrap());
                 }
             }
@@ -508,7 +511,10 @@ impl Server {
                 .header("content-type", "text/plain; charset=UTF-8")
                 .header("content-length", default.len().to_string())
                 .header("server", "LarvaPHP")
-                .body(Full::new(Bytes::from(default.to_vec())))
+                .body(Full::new(body_for_head(
+                    req.method().as_str(),
+                    Bytes::from(default.to_vec()),
+                )))
                 .unwrap());
         }
 
@@ -562,7 +568,10 @@ impl Server {
                         .header("content-type", "text/plain; charset=UTF-8")
                         .header("content-length", content.len().to_string())
                         .header("server", "LarvaPHP")
-                        .body(Full::new(Bytes::from(content)))
+                        .body(Full::new(body_for_head(
+                            req.method().as_str(),
+                            Bytes::from(content),
+                        )))
                         .unwrap());
                 }
             }
@@ -649,7 +658,7 @@ impl Server {
                             ("content-length".to_string(), content.len().to_string()),
                             ("server".to_string(), "LarvaPHP".to_string()),
                         ],
-                        content,
+                        body_vec_for_head(method, content),
                     ));
                 }
             }
@@ -661,7 +670,7 @@ impl Server {
                     ("content-length".to_string(), default.len().to_string()),
                     ("server".to_string(), "LarvaPHP".to_string()),
                 ],
-                default,
+                body_vec_for_head(method, default),
             ));
         }
 
@@ -1045,7 +1054,10 @@ impl Server {
                             .header("content-type", "text/plain; charset=UTF-8")
                             .header("content-length", content.len().to_string())
                             .header("server", "LarvaPHP")
-                            .body(Full::new(Bytes::from(content)))
+                            .body(Full::new(body_for_head(
+                                req.method().as_str(),
+                                Bytes::from(content),
+                            )))
                             .unwrap(),
                     );
                 }
@@ -1059,7 +1071,10 @@ impl Server {
                     .header("content-type", "text/plain; charset=UTF-8")
                     .header("content-length", default.len().to_string())
                     .header("server", "LarvaPHP")
-                    .body(Full::new(Bytes::from(default.to_vec())))
+                    .body(Full::new(body_for_head(
+                        req.method().as_str(),
+                        Bytes::from(default.to_vec()),
+                    )))
                     .unwrap(),
             );
         }
@@ -1077,7 +1092,10 @@ impl Server {
                             .header("content-type", "text/plain; charset=UTF-8")
                             .header("content-length", content.len().to_string())
                             .header("server", "LarvaPHP")
-                            .body(Full::new(Bytes::from(content)))
+                            .body(Full::new(body_for_head(
+                                req.method().as_str(),
+                                Bytes::from(content),
+                            )))
                             .unwrap(),
                     );
                 }
@@ -1091,7 +1109,10 @@ impl Server {
                     .header("content-type", "text/plain; charset=UTF-8")
                     .header("content-length", default.len().to_string())
                     .header("server", "LarvaPHP")
-                    .body(Full::new(Bytes::from(default.to_vec())))
+                    .body(Full::new(body_for_head(
+                        req.method().as_str(),
+                        Bytes::from(default.to_vec()),
+                    )))
                     .unwrap(),
             );
         }
@@ -2175,6 +2196,24 @@ fn static_response(status: StatusCode, headers: Vec<(&str, String)>, body: Bytes
     }
 }
 
+/// A HEAD response keeps the representation headers but must not carry a body.
+fn body_for_head(method: &str, body: Bytes) -> Bytes {
+    if method.eq_ignore_ascii_case("HEAD") {
+        Bytes::new()
+    } else {
+        body
+    }
+}
+
+/// Transport-agnostic counterpart of `body_for_head` for HTTP/3 parts.
+fn body_vec_for_head(method: &str, body: Vec<u8>) -> Vec<u8> {
+    if method.eq_ignore_ascii_case("HEAD") {
+        Vec::new()
+    } else {
+        body
+    }
+}
+
 /// Cached gzip variant of a static file. Invalidated by (mtime, size), so a
 /// changed asset is recompressed on the next request without a manual purge.
 #[derive(Clone)]
@@ -2285,10 +2324,15 @@ fn edge_cache_response(page: &CachedPage, method: &str, accepts_gzip: bool) -> R
         .unwrap()
 }
 
-/// WordPress adds `?ver=` (and similar) to versioned assets, whose URL changes
-/// when the file changes: those can be cached permanently. Unversioned files
-/// get a shorter lifetime so deployments are still picked up quickly.
+/// WordPress uploads are content-addressed by filename in practice: replacing
+/// an image creates a new attachment file. They can be cached permanently.
+/// Versioned theme/plugin assets (`?ver=`) are equally safe. Other unversioned
+/// files keep a short lifetime so deployments are still picked up quickly.
 fn static_cache_control(uri: &str) -> &'static str {
+    if uri.contains("/wp-content/uploads/") {
+        return "public, max-age=31536000, immutable";
+    }
+
     let query = uri.split_once('?').map(|(_, q)| q).unwrap_or("");
     let versioned = query.split('&').any(|pair| {
         let key = pair.split_once('=').map(|(k, _)| k).unwrap_or(pair);
@@ -3246,6 +3290,27 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn uploads_get_long_cache_without_version_query() {
+        let dir = std::env::temp_dir().join(format!("larva-upload-cache-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("placeholder-image-1.png");
+        std::fs::write(&path, b"\x89PNG\r\n\x1a\n").unwrap();
+
+        let resp = serve_static_file_parts(
+            &path.to_string_lossy(),
+            "GET",
+            &hyper::HeaderMap::new(),
+            "/wp-content/uploads/2026/11/placeholder-image-1.png",
+        )
+        .unwrap();
+
+        assert!(resp.headers.iter().any(|(n, v)| n == "cache-control"
+            && v == "public, max-age=31536000, immutable"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     // === handle_request_parts tests (HTTP/3 core) ===
 
     #[test]
@@ -3342,5 +3407,13 @@ mod tests {
         assert!(result.is_ok());
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn head_helpers_remove_body_without_touching_content_length() {
+        assert!(body_for_head("HEAD", Bytes::from_static(b"abc")).is_empty());
+        assert_eq!(&body_for_head("GET", Bytes::from_static(b"abc"))[..], b"abc");
+        assert!(body_vec_for_head("head", b"abc".to_vec()).is_empty());
+        assert_eq!(body_vec_for_head("POST", b"abc".to_vec()), b"abc");
     }
 }
