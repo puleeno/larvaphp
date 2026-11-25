@@ -2231,7 +2231,10 @@ fn gzip_cache() -> &'static DashMap<String, CachedGzip> {
 }
 
 fn gzip_bytes(data: &[u8]) -> Result<Bytes> {
-    let mut encoder = GzEncoder::new(Vec::with_capacity(data.len() / 2), Compression::fast());
+    // Cached HTML dominates the mobile critical path. A standard compression
+    // level saves ~10KB on the homepage response without recalculating per
+    // request, because the result is kept in GZIP_CACHE.
+    let mut encoder = GzEncoder::new(Vec::with_capacity(data.len() / 2), Compression::default());
     encoder.write_all(data).map_err(Error::Io)?;
     Ok(Bytes::from(encoder.finish().map_err(Error::Io)?))
 }
