@@ -499,8 +499,10 @@ fn main() -> ExitCode {
         if server.feature_enabled(larva_php::FeatureKind::Http3)
             || server.feature_enabled(larva_php::FeatureKind::Acme)
         {
-            // Obtain a Let's Encrypt certificate if requested.
-            let (le_cert, le_key) = if server.feature_enabled(larva_php::FeatureKind::Acme) {
+            // Obtain a Let's Encrypt certificate only when the user explicitly
+            // requests it (--lets-encrypt). The Acme *feature* being compiled in
+            // (default: all) must not force certificate provisioning.
+            let (le_cert, le_key) = if args.lets_encrypt {
                 if args.acme_email.is_none() || args.acme_domains.is_none() {
                     eprintln!(
                         "--lets-encrypt requires --acme-email and --acme-domains"
