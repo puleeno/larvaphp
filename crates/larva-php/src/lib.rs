@@ -31,6 +31,7 @@ pub mod context;
 pub mod embed;
 pub mod embed_php;
 pub mod env;
+pub mod edge_cache;
 pub mod errors;
 pub mod fastcgi;
 pub mod features;
@@ -43,6 +44,8 @@ pub mod runtime;
 pub mod scaling;
 pub mod server;
 pub mod thread;
+#[cfg(feature = "tls")]
+pub mod tls;
 pub mod types;
 pub mod worker;
 

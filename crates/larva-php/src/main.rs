@@ -71,7 +71,12 @@ struct Args {
     #[arg(long = "embedded")]
     embedded: bool,
 
-    /// Path to a TLS certificate (PEM) for HTTP/3. Auto-generated if missing.
+    /// Serve HTTPS directly on --addr using the certificate from --cert/--key
+    /// or from --lets-encrypt. Requires --features tls.
+    #[arg(long = "tls")]
+    tls: bool,
+
+    /// Path to a TLS certificate (PEM) for HTTP/3 and HTTPS.
     #[arg(long = "cert", value_name = "FILE")]
     cert: Option<String>,
 
@@ -475,15 +480,11 @@ fn main() -> ExitCode {
             return ExitCode::from(1);
         }
 
-        // Optionally start the HTTP/3 (QUIC/UDP) listener on the same port.
-        // Browsers that don't support HTTP/3 transparently keep using the TCP
-        // server (HTTP/2 / HTTP/1.1).
-        //
-        // If --lets-encrypt is set, obtain a certificate via ACME first. The
-        // HTTP-01 challenge tokens are served from the challenge directory
-        // (default: <root>/.well-known/acme-challenge/), so the HTTP server
-        // must be reachable on port 80 for validation.
-        let h3_addr = std::net::SocketAddr::new(addr.ip(), addr.port()).to_string();
+        // HTTP/3 (QUIC) needs a certificate. If --lets-encrypt is set, obtain
+        // a certificate via ACME first. The HTTP-01 challenge tokens are served
+        // from the challenge directory (default:
+        // <root>/.well-known/acme-challenge/), so the HTTP server must be
+        // reachable on port 80 for validation.
         let (h3_cert, h3_key) = match (args.cert.clone(), args.key.clone()) {
             (Some(c), Some(k)) => (c, k),
             _ => {
@@ -592,16 +593,15 @@ fn main() -> ExitCode {
                 (h3_cert.clone(), h3_key.clone())
             };
 
-            let server_arc = std::sync::Arc::new(larva_php::server::Server::new(&root).unwrap());
+            let h3_addr = std::net::SocketAddr::new(addr.ip(), addr.port()).to_string();
             match larva_php::http3::ensure_cert(&le_cert, &le_key) {
                 Ok((cert, key)) => {
                     let h3 = larva_php::http3::Http3Server::new(
                         h3_addr.clone(),
                         cert,
                         key,
-                        server_arc,
+                        std::sync::Arc::new(larva_php::server::Server::new(&root).unwrap()),
                     );
-                    // Advertise HTTP/3 on TCP responses via Alt-Svc.
                     larva_php::server::set_http3_port(addr.port());
                     std::thread::spawn(move || {
                         if let Err(e) = h3.run() {

@@ -229,14 +229,17 @@ impl AcmeClient {
         let csr_path = self.config.cert_dir.join("domain.csr.pem");
         self.generate_domain_key_and_csr(&domain_key_path, &csr_path)?;
 
-        let csr_der = fs::read(&csr_path)
+        let csr_pem = fs::read_to_string(&csr_path)
             .map_err(|e| Error::Acme(format!("read CSR: {}", e)))?;
+        let csr_der = Self::pem_to_der(&csr_pem, "CERTIFICATE REQUEST")?;
         let csr_b64 = URL_SAFE_NO_PAD.encode(&csr_der);
 
         let order_url = self.create_order(&dir, &account_url).await?;
         self.solve_challenges(&dir, &account_url, &account_jwk, &order_url).await?;
         self.finalize_order(&dir, &account_url, &order_url, &csr_b64).await?;
-        let cert_pem = self.download_certificate(&dir, &order_url).await?;
+        let cert_pem = self
+            .download_certificate(&dir, &account_url, &order_url)
+            .await?;
 
         // Save cert + chain.
         let cert_path = self.config.cert_dir.join(CERT_FILENAME);
@@ -281,6 +284,45 @@ impl AcmeClient {
         }
         serde_json::from_str(&body)
             .map_err(|e| Error::Acme(format!("parse directory: {}", e)))
+    }
+
+    /// Fetch a fresh replay nonce from the ACME directory.
+    async fn fetch_nonce(&self, dir: &Value) -> Result<String> {
+        let url = dir["newNonce"]
+            .as_str()
+            .ok_or_else(|| Error::Acme("directory missing newNonce".to_string()))?;
+        let resp = self
+            .http
+            .get(url)
+            .send()
+            .await
+            .map_err(|e| Error::Acme(format!("fetch nonce: {}", e)))?;
+        resp.headers()
+            .get("replay-nonce")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string())
+            .ok_or_else(|| Error::Acme("newNonce response missing replay-nonce".to_string()))
+    }
+
+    /// Decode a single PEM block into DER bytes.
+    fn pem_to_der(pem: &str, label: &str) -> Result<Vec<u8>> {
+        let begin = format!("-----BEGIN {}-----", label);
+        let end = format!("-----END {}-----", label);
+        let start = pem
+            .find(&begin)
+            .ok_or_else(|| Error::Acme(format!("PEM missing {} header", label)))?
+            + begin.len();
+        let stop = pem
+            .find(&end)
+            .ok_or_else(|| Error::Acme(format!("PEM missing {} footer", label)))?;
+        let body: String = pem[start..stop]
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        use base64::Engine;
+        base64::engine::general_purpose::STANDARD
+            .decode(body)
+            .map_err(|e| Error::Acme(format!("decode PEM {}: {}", label, e)))
     }
 
     // ---- Private: account ----
@@ -462,14 +504,29 @@ impl AcmeClient {
         Ok(URL_SAFE_NO_PAD.encode(&sig))
     }
 
-    /// Build a JWS protected header.
-    fn protected_header(&self, nonce: &str, url: &str, jwk: &Value) -> Result<String> {
-        let protected = json!({
-            "alg": "RS256",
-            "jwk": jwk,
-            "nonce": nonce,
-            "url": url,
-        });
+    /// Build a JWS protected header. Account-scoped requests must use `kid`;
+    /// only account registration uses the full `jwk`.
+    fn protected_header(
+        &self,
+        nonce: &str,
+        url: &str,
+        jwk: &Value,
+        kid: Option<&str>,
+    ) -> Result<String> {
+        let protected = match kid {
+            Some(kid) => json!({
+                "alg": "RS256",
+                "kid": kid,
+                "nonce": nonce,
+                "url": url,
+            }),
+            None => json!({
+                "alg": "RS256",
+                "jwk": jwk,
+                "nonce": nonce,
+                "url": url,
+            }),
+        };
         Ok(URL_SAFE_NO_PAD.encode(serde_json::to_string(&protected)?.as_bytes()))
     }
 
@@ -478,11 +535,12 @@ impl AcmeClient {
         &self,
         account_key: &Path,
         jwk: &Value,
+        kid: Option<&str>,
         url: &str,
         payload: Option<&Value>,
         nonce: &str,
     ) -> Result<(reqwest::Response, String)> {
-        let protected = self.protected_header(nonce, url, jwk)?;
+        let protected = self.protected_header(nonce, url, jwk, kid)?;
         let payload_b64 = match payload {
             Some(p) => URL_SAFE_NO_PAD.encode(serde_json::to_string(p)?.as_bytes()),
             None => URL_SAFE_NO_PAD.encode(b""),
@@ -526,12 +584,15 @@ impl AcmeClient {
             .as_str()
             .ok_or_else(|| Error::Acme("directory missing newAccount".to_string()))?;
 
-        let (_, new_nonce) = self.post_signed(account_key, jwk, new_account, None, "").await?;
-
-        // Re-post with the fresh nonce (ACME requires a valid nonce on the
-        // registration request).
+        let nonce = self.fetch_nonce(dir).await?;
+        // ACME newAccount requires a JSON payload; an empty one is rejected
+        // by Let's Encrypt with "Error unmarshaling JSON".
+        let payload = json!({
+            "termsOfServiceAgreed": true,
+            "contact": [format!("mailto:{}", self.config.email)],
+        });
         let (resp, _) = self
-            .post_signed(account_key, jwk, new_account, None, &new_nonce)
+            .post_signed(account_key, jwk, None, new_account, Some(&payload), &nonce)
             .await?;
 
         let status = resp.status();
@@ -575,24 +636,15 @@ impl AcmeClient {
             .map(|d| json!({ "type": "dns", "value": d }))
             .collect();
 
-        let (_, new_nonce) = self
-            .post_signed(
-                &account_key_path,
-                &jwk,
-                new_order,
-                None,
-                "",
-            )
-            .await?;
-
-        // Re-post with the fresh nonce.
+        let nonce = self.fetch_nonce(dir).await?;
         let (resp, _) = self
             .post_signed(
                 &account_key_path,
                 &jwk,
+                Some(_account_url),
                 new_order,
                 Some(&json!({ "identifiers": identifiers })),
-                &new_nonce,
+                &nonce,
             )
             .await?;
 
@@ -618,18 +670,19 @@ impl AcmeClient {
     /// Solve HTTP-01 challenges for the order.
     async fn solve_challenges(
         &self,
-        _dir: &Value,
-        _account_url: &str,
+        dir: &Value,
+        account_url: &str,
         jwk: &Value,
         order_url: &str,
     ) -> Result<()> {
         let account_key_path = self.config.cert_dir.join(ACCOUNT_KEY_FILENAME);
 
         // Fetch the order to get authorizations.
-        let mut nonce = String::new();
+        let mut nonce = self.fetch_nonce(dir).await?;
         let (resp, new_nonce) = self.post_signed(
             account_key_path.as_path(),
             jwk,
+            Some(account_url),
             order_url,
             None,
             &nonce,
@@ -649,14 +702,18 @@ impl AcmeClient {
         let thumbprint = self.account_jwk_thumbprint(&account_key_path)?;
 
         for authz in authorizations {
-            let authz_url = authz["url"].as_str().ok_or_else(|| {
-                Error::Acme("authorization missing url".to_string())
-            })?;
+            // Let's Encrypt returns authorization URLs as plain strings.
+            // Be tolerant of implementations that wrap them in an object.
+            let authz_url = authz
+                .as_str()
+                .or_else(|| authz["url"].as_str())
+                .ok_or_else(|| Error::Acme("authorization missing url".to_string()))?;
 
             // Fetch the authorization to get challenges.
             let (resp, new_nonce) = self.post_signed(
                 account_key_path.as_path(),
                 jwk,
+                Some(account_url),
                 authz_url,
                 None,
                 &nonce,
@@ -691,6 +748,7 @@ impl AcmeClient {
             let (resp, new_nonce) = self.post_signed(
                 account_key_path.as_path(),
                 jwk,
+                Some(account_url),
                 challenge_url,
                 Some(&json!({})),
                 &nonce,
@@ -708,7 +766,14 @@ impl AcmeClient {
             }
 
             // Poll until valid.
-            self.poll_authorization(account_key_path.as_path(), jwk, authz_url, &mut nonce).await?;
+            self.poll_authorization(
+                account_key_path.as_path(),
+                jwk,
+                account_url,
+                authz_url,
+                &mut nonce,
+            )
+            .await?;
         }
 
         Ok(())
@@ -719,12 +784,15 @@ impl AcmeClient {
         &self,
         account_key: &Path,
         jwk: &Value,
+        account_url: &str,
         authz_url: &str,
         nonce: &mut String,
     ) -> Result<()> {
         for _ in 0..60 {
             tokio::time::sleep(Duration::from_secs(2)).await;
-            let (resp, new_nonce) = self.post_signed(account_key, jwk, authz_url, None, nonce).await?;
+            let (resp, new_nonce) = self
+                .post_signed(account_key, jwk, Some(account_url), authz_url, None, nonce)
+                .await?;
             *nonce = new_nonce;
 
             if !resp.status().is_success() {
@@ -755,49 +823,53 @@ impl AcmeClient {
     /// Finalize the order with the CSR.
     async fn finalize_order(
         &self,
-        _dir: &Value,
-        _account_url: &str,
+        dir: &Value,
+        account_url: &str,
         order_url: &str,
         csr_b64: &str,
     ) -> Result<()> {
-        let order: Value = serde_json::from_str(
-            &self
-                .http
-                .get(order_url)
-                .send()
-                .await
-                .map_err(|e| Error::Acme(format!("get order: {}", e)))?
-                .text()
-                .await
-                .map_err(|e| Error::Acme(format!("read order: {}", e)))?,
-        )
-        .map_err(|e| Error::Acme(format!("parse order: {}", e)))?;
-
-        let finalize_url = order["finalize"]
-            .as_str()
-            .ok_or_else(|| Error::Acme("order missing finalize".to_string()))?;
-
         let account_key_path = self.config.cert_dir.join(ACCOUNT_KEY_FILENAME);
         let jwk = self.account_jwk(&account_key_path)?;
-        let mut nonce = String::new();
+        let mut nonce = self.fetch_nonce(dir).await?;
 
-        let (_, new_nonce) = self
+        // ACME resources must be read with POST-as-GET, not a plain GET.
+        let (resp, new_nonce) = self
             .post_signed(
                 &account_key_path,
                 &jwk,
-                finalize_url,
-                Some(&json!({ "csr": csr_b64 })),
+                Some(account_url),
+                order_url,
+                None,
                 &nonce,
             )
             .await?;
         nonce = new_nonce;
 
-        // Re-post with fresh nonce (finalize may need it).
+        let order_status = resp.status();
+        let order_body = resp
+            .text()
+            .await
+            .map_err(|e| Error::Acme(format!("read order: {}", e)))?;
+        if !order_status.is_success() {
+            return Err(Error::Acme(format!(
+                "get order failed: {} {}",
+                order_status, order_body
+            )));
+        }
+        let order: Value = serde_json::from_str(&order_body)
+            .map_err(|e| Error::Acme(format!("parse order: {}", e)))?;
+
+        let finalize_url = order["finalize"]
+            .as_str()
+            .ok_or_else(|| Error::Acme("order missing finalize".to_string()))?
+            .to_string();
+
         let (resp, _) = self
             .post_signed(
                 &account_key_path,
                 &jwk,
-                finalize_url,
+                Some(account_url),
+                &finalize_url,
                 Some(&json!({ "csr": csr_b64 })),
                 &nonce,
             )
@@ -816,23 +888,36 @@ impl AcmeClient {
     }
 
     /// Download the issued certificate.
-    async fn download_certificate(&self, _dir: &Value, order_url: &str) -> Result<String> {
-        // Poll the order until the certificate is available.
+    async fn download_certificate(
+        &self,
+        dir: &Value,
+        account_url: &str,
+        order_url: &str,
+    ) -> Result<String> {
+        let account_key_path = self.config.cert_dir.join(ACCOUNT_KEY_FILENAME);
+        let jwk = self.account_jwk(&account_key_path)?;
+        let mut nonce = self.fetch_nonce(dir).await?;
+
+        // Poll the order until the certificate is available. Order resources
+        // require POST-as-GET; the certificate URL itself is a plain GET.
         for _ in 0..60 {
             tokio::time::sleep(Duration::from_secs(2)).await;
-            let resp = self
-                .http
-                .get(order_url)
-                .send()
-                .await
-                .map_err(|e| Error::Acme(format!("get order for cert: {}", e)))?;
+            let (resp, new_nonce) = self
+                .post_signed(
+                    &account_key_path,
+                    &jwk,
+                    Some(account_url),
+                    order_url,
+                    None,
+                    &nonce,
+                )
+                .await?;
+            nonce = new_nonce;
             if !resp.status().is_success() {
                 continue;
             }
-            let order: Value = serde_json::from_str(
-                &resp.text().await.unwrap_or_default(),
-            )
-            .unwrap_or(Value::Null);
+            let body = resp.text().await.unwrap_or_default();
+            let order: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
             let cert_url = order["certificate"].as_str();
             if let Some(cert_url) = cert_url {
                 let cert_resp = self

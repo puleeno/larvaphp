@@ -39,10 +39,16 @@ rcgen = { version = "0.13", optional = true }
 # toolchains, and native-tls conflicts with the BoringSSL used by HTTP/3.
 reqwest = { version = "0.13", optional = true, default-features = false, features = ["json", "rustls-no-provider", "http2", "system-proxy"] }
 rustls = { version = "0.23", optional = true, default-features = false, features = ["ring", "std", "tls12"] }
+# Avoid tokio-rustls' default aws-lc-rs provider: larva-php selects ring
+# explicitly. Enabling both makes rustls panic at runtime when it cannot pick
+# a process-wide CryptoProvider.
+tokio-rustls = { version = "0.26", optional = true, default-features = false, features = ["ring", "tls12", "logging"] }
+rustls-pemfile = { version = "2", optional = true }
 base64 = { version = "0.22", optional = true }
 larva-php-panel = { workspace = true, optional = true }
 memmap2 = { workspace = true }
 num_cpus = { workspace = true }
+flate2 = { workspace = true }
 
 [features]
 default = ["mercure", "watcher", "fcgi", "http3", "acme", "embedded", "panel"]
@@ -54,6 +60,7 @@ fcgi = []
 embedded = []
 acme = ["reqwest", "rustls", "base64"]
 panel = ["larva-php-panel"]
+tls = ["rustls", "tokio-rustls", "rustls-pemfile"]
 
 [[bin]]
 name = "larva-php"
