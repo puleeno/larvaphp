@@ -182,6 +182,14 @@ impl PlatformBuild for UnixPlatform {
     }
 
     fn php_lib_dir_default(&self) -> String {
+        if cfg!(target_os = "macos") {
+            let lib = php_embed_lib();
+            for dir in ["/opt/homebrew/lib", "/usr/local/lib"] {
+                if Path::new(dir).join(format!("lib{}.dylib", lib)).exists() {
+                    return dir.to_string();
+                }
+            }
+        }
         "/usr/lib".to_string()
     }
 }
