@@ -27,6 +27,7 @@ use dashmap::DashMap;
 use crate::context::{PhpContext, RequestOption};
 use crate::edge_cache::{CachedPage, EdgeCache};
 use crate::env::PreparedEnv;
+use crate::error_page;
 use crate::errors::{Error, Result};
 use crate::worker::Worker;
 use tracing::{error, info, Level};
@@ -469,10 +470,11 @@ impl Server {
         opts: Vec<Box<dyn RequestOption>>,
     ) -> Result<Response<Full<Bytes>>> {
         if !self.is_registered() {
-            return Ok(Response::builder()
-                .status(StatusCode::SERVICE_UNAVAILABLE)
-                .body(Full::new(Bytes::from("Service Unavailable")))
-                .unwrap());
+            return Ok(error_page_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                req.method().as_str(),
+                vec![],
+            ));
         }
 
         let ctx = PhpContext::from_request(&req, Arc::new(Server::fallback()), opts)?;
@@ -531,10 +533,11 @@ impl Server {
             match alt {
                 Some(ref p) if std::path::Path::new(p).exists() => alt.unwrap(),
                 _ => {
-                    return Ok(Response::builder()
-                        .status(StatusCode::NOT_FOUND)
-                        .body(Full::new(Bytes::from("Not Found")))
-                        .unwrap());
+                    return Ok(error_page_response(
+                        StatusCode::NOT_FOUND,
+                        req.method().as_str(),
+                        vec![],
+                    ));
                 }
             }
         } else {
@@ -576,11 +579,11 @@ impl Server {
                 }
             }
             // No robots.txt — fall through to 404.
-            return Ok(Response::builder()
-                .status(StatusCode::NOT_FOUND)
-                .header("server", "LarvaPHP")
-                .body(Full::new(Bytes::from("Not Found")))
-                .unwrap());
+            return Ok(error_page_response(
+                StatusCode::NOT_FOUND,
+                req.method().as_str(),
+                vec![],
+            ));
         }
 
         // Serve a pre-rendered CMS page without starting PHP at all.
@@ -614,6 +617,12 @@ impl Server {
         // X-Sendfile: serve the referenced file directly.
         if let Some(resp) = try_x_sendfile(&headers, status_code) {
             return Ok(resp);
+        }
+
+        if is_error_status(status_code) {
+            let (headers, body) =
+                error_page_parts(status_code, ctx.request_method.as_str(), headers);
+            return Ok(build_response(status_code, headers, Bytes::from(body)));
         }
 
         let mut builder = Response::builder()
@@ -680,11 +689,9 @@ impl Server {
             match self.resolve_index_php(uri) {
                 Some(p) if std::path::Path::new(&p).exists() => p,
                 _ => {
-                    return Ok((
-                        StatusCode::NOT_FOUND,
-                        vec![("content-type".to_string(), "text/plain".to_string())],
-                        b"Not Found".to_vec(),
-                    ))
+                    let (headers, body) =
+                        error_page_parts(StatusCode::NOT_FOUND, method, vec![]);
+                    return Ok((StatusCode::NOT_FOUND, headers, body))
                 }
             }
         } else {
@@ -705,12 +712,18 @@ impl Server {
                     }
                 }
                 return match serve_static_file_parts(&script_path, method, &h3_headers, uri) {
-                    Ok(parts) => Ok((parts.status, parts.headers, parts.body.to_vec())),
-                    Err(_) => Ok((
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        vec![("server".to_string(), "LarvaPHP".to_string())],
-                        b"Internal Server Error".to_vec(),
-                    )),
+                    Ok(parts) => {
+                        let parts = styled_static_response(parts, method);
+                        Ok((parts.status, parts.headers, parts.body.to_vec()))
+                    }
+                    Err(_) => {
+                        let (headers, body) = error_page_parts(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            method,
+                            vec![("server".to_string(), "LarvaPHP".to_string())],
+                        );
+                        Ok((StatusCode::INTERNAL_SERVER_ERROR, headers, body))
+                    }
                 };
             }
         }
@@ -729,17 +742,17 @@ impl Server {
         ctx.https = "on".to_string();
 
         if let Some(page) = self.edge_cache.lookup(&ctx) {
-            return Ok((
-                StatusCode::from_u16(page.status).unwrap_or(StatusCode::OK),
-                vec![
-                    ("server".to_string(), "LarvaPHP".to_string()),
-                    ("cache-control".to_string(), "no-cache".to_string()),
-                    ("x-larva-edge-cache".to_string(), "HIT".to_string()),
-                    ("content-type".to_string(), page.content_type.clone()),
-                    ("content-length".to_string(), page.html.len().to_string()),
-                ],
-                page.html,
-            ));
+            let status = StatusCode::from_u16(page.status).unwrap_or(StatusCode::OK);
+            let headers = vec![
+                ("server".to_string(), "LarvaPHP".to_string()),
+                ("cache-control".to_string(), "no-cache".to_string()),
+                ("x-larva-edge-cache".to_string(), "HIT".to_string()),
+                ("content-type".to_string(), page.content_type.clone()),
+                ("content-length".to_string(), page.html.len().to_string()),
+            ];
+            let (headers, body) =
+                maybe_error_page_parts(status, method, headers, page.html);
+            return Ok((status, headers, body_vec_for_head(method, body)));
         }
 
         let body = Bytes::from(body.to_vec());
@@ -766,12 +779,19 @@ impl Server {
                             final_headers.push((n.clone(), v.clone()));
                         }
                     }
-                    return Ok((status, final_headers, content));
+                    let (final_headers, content) = maybe_error_page_parts(
+                        status,
+                        method,
+                        final_headers,
+                        content,
+                    );
+                    return Ok((status, final_headers, body_vec_for_head(method, content)));
                 }
             }
         }
 
-        Ok((status, headers, out_body))
+        let (headers, out_body) = maybe_error_page_parts(status, method, headers, out_body);
+        Ok((status, headers, body_vec_for_head(method, out_body)))
     }
 
     /// Resolve the PHP script path from the request URI.
@@ -1000,10 +1020,11 @@ impl Server {
                             async move {
                                 if !registered {
                                     return Ok::<Response<Full<Bytes>>, hyper::Error>(
-                                        Response::builder()
-                                            .status(StatusCode::SERVICE_UNAVAILABLE)
-                                            .body(Full::new(Bytes::from("Service Unavailable")))
-                                            .unwrap(),
+                                        error_page_response(
+                                            StatusCode::SERVICE_UNAVAILABLE,
+                                            req.method().as_str(),
+                                            vec![],
+                                        ),
                                     );
                                 }
 
@@ -1017,6 +1038,8 @@ impl Server {
                                     .map(|pq| pq.as_str())
                                     .unwrap_or_else(|| req.uri().path())
                                     .to_string();
+                                // `req` is consumed when we read the body below.
+                                let request_method = req.method().as_str().to_string();
 
                                 // Keep every browser on one origin. WordPress'
                                 // absolute form actions point at the bare host,
@@ -1156,11 +1179,11 @@ impl Server {
                         .unwrap_or(false);
                     if is_static {
                         return Ok::<Response<Full<Bytes>>, hyper::Error>(
-                            Response::builder()
-                                .status(StatusCode::NOT_FOUND)
-                                .header("server", "LarvaPHP")
-                                .body(Full::new(Bytes::from("Not Found")))
-                                .unwrap(),
+                            error_page_response(
+                                StatusCode::NOT_FOUND,
+                                req.method().as_str(),
+                                vec![],
+                            ),
                         );
                     }
                     resolve_index_php_static(&uri, &root)
@@ -1171,12 +1194,11 @@ impl Server {
         };
 
         let Some(path) = script_path else {
-            return Ok::<Response<Full<Bytes>>, hyper::Error>(
-                Response::builder()
-                    .status(StatusCode::NOT_FOUND)
-                    .body(Full::new(Bytes::from("Not Found")))
-                    .unwrap(),
-            );
+            return Ok::<Response<Full<Bytes>>, hyper::Error>(error_page_response(
+                StatusCode::NOT_FOUND,
+                req.method().as_str(),
+                vec![],
+            ));
         };
 
         // Serve static files directly (not .php), nginx-style validators,
@@ -1190,11 +1212,11 @@ impl Server {
                     &uri,
                 ) {
                     Ok(response) => Ok(response),
-                    Err(_) => Ok(Response::builder()
-                        .status(StatusCode::INTERNAL_SERVER_ERROR)
-                        .header("server", "LarvaPHP")
-                        .body(Full::new(Bytes::from_static(b"Internal Server Error")))
-                        .unwrap()),
+                    Err(_) => Ok(error_page_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        req.method().as_str(),
+                        vec![],
+                    )),
                 };
             }
         }
@@ -1206,16 +1228,14 @@ impl Server {
                                 let allowed = rate_limiter.check(&client_ip);
                                 if !allowed {
                                     return Ok::<Response<Full<Bytes>>, hyper::Error>(
-                                        Response::builder()
-                                            .status(StatusCode::TOO_MANY_REQUESTS)
-                                            .header("content-type", "text/plain; charset=UTF-8")
-                                            .header(
-                                                "retry-after",
+                                        error_page_response(
+                                            StatusCode::TOO_MANY_REQUESTS,
+                                            req.method().as_str(),
+                                            vec![(
+                                                "retry-after".to_string(),
                                                 rate_limiter.config.window_secs.to_string(),
-                                            )
-                                            .header("server", "LarvaPHP")
-                                            .body(Full::new(Bytes::from("Too Many Requests")))
-                                            .unwrap(),
+                                            )],
+                                        ),
                                     );
                                 }
 
@@ -1361,19 +1381,11 @@ impl Server {
                                                     > max_body_size as usize
                                                 {
                                                     return Ok::<Response<Full<Bytes>>, hyper::Error>(
-                                                        Response::builder()
-                                                            .status(
-                                                                StatusCode::PAYLOAD_TOO_LARGE,
-                                                            )
-                                                            .header(
-                                                                "content-type",
-                                                                "text/plain; charset=UTF-8",
-                                                            )
-                                                            .header("server", "LarvaPHP")
-                                                            .body(Full::new(Bytes::from(
-                                                                "Payload Too Large",
-                                                            )))
-                                                            .unwrap(),
+                                                        error_page_response(
+                                                            StatusCode::PAYLOAD_TOO_LARGE,
+                                                            request_method.as_str(),
+                                                            vec![],
+                                                        ),
                                                     );
                                                 }
                                                 body_bytes.extend_from_slice(chunk);
@@ -1395,6 +1407,21 @@ impl Server {
                                         {
                                             return Ok::<Response<Full<Bytes>>, hyper::Error>(
                                                 resp,
+                                            );
+                                        }
+
+                                        if is_error_status(status_code) {
+                                            let (headers, body) = error_page_parts(
+                                                status_code,
+                                                request_method.as_str(),
+                                                headers,
+                                            );
+                                            return Ok::<Response<Full<Bytes>>, hyper::Error>(
+                                                build_response(
+                                                    status_code,
+                                                    headers,
+                                                    Bytes::from(body),
+                                                ),
                                             );
                                         }
 
@@ -1422,12 +1449,11 @@ impl Server {
                                     Err(e) => {
                                         error!("PHP execution error: {}", e);
                                         Ok::<Response<Full<Bytes>>, hyper::Error>(
-                                            Response::builder()
-                                                .status(StatusCode::INTERNAL_SERVER_ERROR)
-                                                .body(Full::new(Bytes::from(
-                                                    "Internal Server Error",
-                                                )))
-                                                .unwrap(),
+                                            error_page_response(
+                                                StatusCode::INTERNAL_SERVER_ERROR,
+                                                request_method.as_str(),
+                                                vec![],
+                                            ),
                                         )
                                     }
                                 }
@@ -2230,6 +2256,114 @@ fn body_vec_for_head(method: &str, body: Vec<u8>) -> Vec<u8> {
     }
 }
 
+fn is_error_status(status: StatusCode) -> bool {
+    status.is_client_error() || status.is_server_error()
+}
+
+/// Headers that describe the *old* representation and must not survive when
+/// the body is replaced by the shared error page.
+fn is_replaced_representation_header(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "content-type"
+            | "content-length"
+            | "content-encoding"
+            | "transfer-encoding"
+            | "etag"
+            | "last-modified"
+            | "expires"
+            | "age"
+            | "link"
+            | "x-sendfile"
+    )
+}
+
+/// Build the headers and body of the shared error page.
+///
+/// `content-length` always describes the error page (not the original body),
+/// even for HEAD, where the body is omitted but the length is preserved.
+fn error_page_parts(
+    status: StatusCode,
+    method: &str,
+    extra_headers: Vec<(String, String)>,
+) -> (Vec<(String, String)>, Vec<u8>) {
+    let body = error_page::html(status);
+    let mut headers = vec![
+        ("content-type".to_string(), "text/html; charset=UTF-8".to_string()),
+        ("content-length".to_string(), body.len().to_string()),
+        ("cache-control".to_string(), "no-store".to_string()),
+        ("server".to_string(), "LarvaPHP".to_string()),
+        ("x-content-type-options".to_string(), "nosniff".to_string()),
+        ("x-frame-options".to_string(), "DENY".to_string()),
+        ("referrer-policy".to_string(), "no-referrer".to_string()),
+    ];
+    if let Some(alt) = alt_svc_header() {
+        headers.push(("alt-svc".to_string(), alt));
+    }
+
+    for (name, value) in extra_headers {
+        if is_replaced_representation_header(&name) {
+            continue;
+        }
+        if headers.iter().any(|(existing, _)| existing.eq_ignore_ascii_case(&name)) {
+            continue;
+        }
+        headers.push((name, value));
+    }
+
+    (headers, body_vec_for_head(method, body))
+}
+
+/// Replace a 4xx/5xx body with the shared error page, leaving other statuses
+/// untouched. Useful at response boundaries that already produced headers.
+fn maybe_error_page_parts(
+    status: StatusCode,
+    method: &str,
+    headers: Vec<(String, String)>,
+    body: Vec<u8>,
+) -> (Vec<(String, String)>, Vec<u8>) {
+    if is_error_status(status) {
+        error_page_parts(status, method, headers)
+    } else {
+        (headers, body)
+    }
+}
+
+fn build_response(
+    status: StatusCode,
+    headers: Vec<(String, String)>,
+    body: Bytes,
+) -> Response<Full<Bytes>> {
+    let mut builder = Response::builder().status(status);
+    for (name, value) in &headers {
+        builder = builder.header(name.as_str(), value.as_str());
+    }
+    builder.body(Full::new(body)).unwrap()
+}
+
+/// Build a complete Hyper response for a server-generated error.
+fn error_page_response(
+    status: StatusCode,
+    method: &str,
+    extra_headers: Vec<(String, String)>,
+) -> Response<Full<Bytes>> {
+    let (headers, body) = error_page_parts(status, method, extra_headers);
+    build_response(status, headers, Bytes::from(body))
+}
+
+/// Apply the shared error page to a static response (403/404/405/412/416/500).
+fn styled_static_response(resp: StaticResponse, method: &str) -> StaticResponse {
+    if !is_error_status(resp.status) {
+        return resp;
+    }
+    let (headers, body) = error_page_parts(resp.status, method, resp.headers);
+    StaticResponse {
+        status: resp.status,
+        headers,
+        body: Bytes::from(body),
+    }
+}
+
 /// Cached gzip variant of a static file. Invalidated by (mtime, size), so a
 /// changed asset is recompressed on the next request without a manual purge.
 #[derive(Clone)]
@@ -2332,6 +2466,18 @@ fn edge_cache_response(page: &CachedPage, method: &str, accepts_gzip: bool) -> R
     };
     let body = compressed.clone().unwrap_or_else(|| Bytes::from(page.html.clone()));
     let status = StatusCode::from_u16(page.status).unwrap_or(StatusCode::OK);
+
+    // A cached WordPress 404/500 must not bypass the shared error page.
+    if is_error_status(status) {
+        return error_page_response(
+            status,
+            method,
+            vec![
+                ("x-jankx-cache".to_string(), "HIT".to_string()),
+                ("x-larva-edge-cache".to_string(), "HIT".to_string()),
+            ],
+        );
+    }
 
     let mut builder = Response::builder()
         .status(status)
@@ -2600,7 +2746,8 @@ fn serve_static_file_nginx(
     headers: &hyper::HeaderMap,
     uri: &str,
 ) -> Result<Response<Full<Bytes>>> {
-    let parts = serve_static_file_parts(path, method, headers, uri)?;
+    let parts =
+        styled_static_response(serve_static_file_parts(path, method, headers, uri)?, method);
     let mut builder = Response::builder().status(parts.status);
     for (name, value) in &parts.headers {
         builder = builder.header(name.as_str(), value.as_str());
@@ -3395,10 +3542,16 @@ mod tests {
         // No index.php, so a missing .php returns 404.
 
         let server = Server::new(&dir.to_string_lossy()).unwrap();
-        let (status, _, _) =
+        let (status, headers, body) =
             server.handle_request_parts("GET", "/missing.php", &[], &[]).unwrap();
 
         assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(headers.iter().any(|(name, value)| {
+            name == "content-type" && value.contains("text/html")
+        }));
+        let page = String::from_utf8_lossy(&body);
+        assert!(page.contains("<style>"));
+        assert!(page.contains("Không tìm thấy trang"));
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -3472,6 +3625,84 @@ mod tests {
         assert_eq!(&body_for_head("GET", Bytes::from_static(b"abc"))[..], b"abc");
         assert!(body_vec_for_head("head", b"abc".to_vec()).is_empty());
         assert_eq!(body_vec_for_head("POST", b"abc".to_vec()), b"abc");
+    }
+
+    #[test]
+    fn error_page_head_keeps_representation_length_without_body() {
+        let (headers, body) =
+            error_page_parts(StatusCode::SERVICE_UNAVAILABLE, "HEAD", vec![]);
+
+        assert!(body.is_empty());
+        let content_length: usize = headers
+            .iter()
+            .find(|(name, _)| name == "content-length")
+            .unwrap()
+            .1
+            .parse()
+            .unwrap();
+        assert!(content_length > 4_000);
+        assert!(headers.iter().any(|(name, value)| {
+            name == "content-type" && value == "text/html; charset=UTF-8"
+        }));
+        assert!(headers
+            .iter()
+            .any(|(name, value)| name == "cache-control" && value == "no-store"));
+    }
+
+    #[test]
+    fn error_page_replaces_stale_representation_headers() {
+        let (headers, body) = error_page_parts(
+            StatusCode::TOO_MANY_REQUESTS,
+            "GET",
+            vec![
+                ("retry-after".to_string(), "60".to_string()),
+                ("content-encoding".to_string(), "gzip".to_string()),
+                ("content-type".to_string(), "text/plain".to_string()),
+                ("etag".to_string(), "\"old-body\"".to_string()),
+            ],
+        );
+
+        assert!(headers
+            .iter()
+            .any(|(name, value)| name == "retry-after" && value == "60"));
+        assert!(!headers
+            .iter()
+            .any(|(name, _)| name == "content-encoding" || name == "etag"));
+        assert_eq!(
+            headers
+                .iter()
+                .filter(|(name, _)| name == "content-type")
+                .count(),
+            1
+        );
+        assert!(String::from_utf8_lossy(&body).contains("Quá nhiều yêu cầu"));
+    }
+
+    #[test]
+    fn php_error_status_body_is_replaced_but_success_is_untouched() {
+        let old_headers = vec![("content-type".to_string(), "text/plain".to_string())];
+
+        let (headers, body) = maybe_error_page_parts(
+            StatusCode::NOT_FOUND,
+            "GET",
+            old_headers.clone(),
+            b"plain php body".to_vec(),
+        );
+        assert!(String::from_utf8_lossy(&body).contains("<style>"));
+        assert!(!headers
+            .iter()
+            .any(|(name, value)| name == "content-type" && value == "text/plain"));
+
+        let (headers, body) = maybe_error_page_parts(
+            StatusCode::OK,
+            "GET",
+            old_headers,
+            b"plain php body".to_vec(),
+        );
+        assert_eq!(body, b"plain php body");
+        assert!(headers
+            .iter()
+            .any(|(name, value)| name == "content-type" && value == "text/plain"));
     }
 
     // === Connection / state isolation ===

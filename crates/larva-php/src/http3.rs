@@ -25,6 +25,7 @@ pub mod imp {
     use quiche::h3;
     use quiche::h3::NameValue;
 
+    use crate::error_page;
     use crate::errors::{Error, Result};
     use crate::server::Server;
 
@@ -44,6 +45,19 @@ pub mod imp {
 
     /// Max requests waiting to be handed to the PHP/static-file workers.
     const REQUEST_QUEUE_CAP: usize = 256;
+
+    /// Minimal headers for HTTP/3 errors produced before the shared request
+    /// core runs. `content-length` is added by `send_h3_response`.
+    fn direct_error_headers() -> Vec<(String, String)> {
+        vec![
+            ("content-type".to_string(), "text/html; charset=UTF-8".to_string()),
+            ("cache-control".to_string(), "no-store".to_string()),
+            ("server".to_string(), "LarvaPHP".to_string()),
+            ("x-content-type-options".to_string(), "nosniff".to_string()),
+            ("x-frame-options".to_string(), "DENY".to_string()),
+            ("referrer-policy".to_string(), "no-referrer".to_string()),
+        ]
+    }
 
     /// A response that could not be fully written in one pass (flow control).
     struct PartialResponse {
@@ -381,13 +395,14 @@ pub mod imp {
                 ),
                 Err(e) => {
                     tracing::warn!("HTTP/3 request failed: {}", e);
+                    let body = error_page::html(StatusCode::INTERNAL_SERVER_ERROR);
                     send_h3_response(
                         &mut client.conn,
                         h3c,
                         done.stream_id,
                         StatusCode::INTERNAL_SERVER_ERROR,
-                        &[],
-                        b"Internal Server Error",
+                        &direct_error_headers(),
+                        &body,
                         &mut client.partial_responses,
                     );
                 }
@@ -475,13 +490,14 @@ pub mod imp {
         };
         if job_tx.try_send(job).is_err() {
             tracing::warn!("HTTP/3 request queue full, returning 503");
+            let body = error_page::html(StatusCode::SERVICE_UNAVAILABLE);
             send_h3_response(
                 conn,
                 http3_conn,
                 stream_id,
                 StatusCode::SERVICE_UNAVAILABLE,
-                &[],
-                b"Service Unavailable",
+                &direct_error_headers(),
+                &body,
                 partial_responses,
             );
         }
@@ -497,24 +513,31 @@ pub mod imp {
         body: &[u8],
         partial_responses: &mut HashMap<u64, PartialResponse>,
     ) {
-        // Build HTTP/3 response headers.
+        // Build HTTP/3 response headers. Preserve an explicit content-length
+        // (notably the error page's length on HEAD requests); only synthesize
+        // one when the shared core did not provide it.
         let mut out_headers = vec![h3::Header::new(
             b":status",
             status.as_u16().to_string().as_bytes(),
         )];
+        let mut has_content_length = false;
         for (name, value) in resp_headers {
-            if name.eq_ignore_ascii_case("content-length")
-                || name.eq_ignore_ascii_case("connection")
+            if name.eq_ignore_ascii_case("content-length") {
+                has_content_length = true;
+                out_headers.push(h3::Header::new(name.as_bytes(), value.as_bytes()));
+                continue;
+            }
+            if name.eq_ignore_ascii_case("connection")
                 || name.eq_ignore_ascii_case("transfer-encoding")
             {
                 continue;
             }
             out_headers.push(h3::Header::new(name.as_bytes(), value.as_bytes()));
         }
-        out_headers.push(h3::Header::new(
-            b"content-length",
-            body.len().to_string().as_bytes(),
-        ));
+        let content_length = body.len().to_string();
+        if !has_content_length {
+            out_headers.push(h3::Header::new(b"content-length", content_length.as_bytes()));
+        }
 
         // Send headers, handling flow control.
         match http3_conn.send_response(conn, stream_id, &out_headers, false) {

@@ -17,6 +17,7 @@ use hyper_util::rt::TokioIo;
 use hyper_util::server::conn::auto;
 use tokio::net::TcpListener;
 
+use crate::error_page;
 use crate::errors::{Error, Result};
 
 /// Build a rustls server configuration from PEM certificate and key files.
@@ -169,11 +170,14 @@ async fn handle_http_request(
                     .unwrap());
             }
         }
+        let body = error_page::html(StatusCode::NOT_FOUND);
         return Ok(Response::builder()
             .status(StatusCode::NOT_FOUND)
-            .header("content-type", "text/plain; charset=utf-8")
+            .header("content-type", "text/html; charset=UTF-8")
+            .header("content-length", body.len().to_string())
+            .header("cache-control", "no-store")
             .header("server", "LarvaPHP")
-            .body(Full::new(Bytes::from_static(b"Not Found")))
+            .body(Full::new(Bytes::from(body)))
             .unwrap());
     }
 
