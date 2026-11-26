@@ -795,14 +795,8 @@ mod tests {
 
             match socket.recv_from(&mut buf) {
                 Ok((n, from)) => {
-                    conn.recv(
-                        &mut buf[..n],
-                        quiche::RecvInfo {
-                            to: local,
-                            from,
-                        },
-                    )
-                    .unwrap();
+                    conn.recv(&mut buf[..n], quiche::RecvInfo { to: local, from })
+                        .unwrap();
                 }
                 Err(e)
                     if e.kind() == std::io::ErrorKind::WouldBlock
