@@ -109,7 +109,7 @@ pub fn panel_html() -> String {
         .empty-state i { font-size: 48px; margin-bottom: 16px; opacity: 0.4; }
     </style>
 </head>
-<body x-data="{ currentPage: 'dashboard', sidebarOpen: false, alert: null, alertType: 'info', stats: { total_websites: 0, active_websites: 0, total_workers: 0, running_workers: 0, ssl_certificates: 0, requests_today: 0, cpu_usage: 0, memory_usage: 0, disk_usage: 0 }, websites: [], sslCerts: [], workers: [], files: [], fileDir: '/', showAddWebsiteModal: false, showAddSslModal: false, showAddUserModal: false, newWebsite: { name: '', domain: '', document_root: '', php_version: '8.3', ssl_enabled: false, acme_email: '', acme_domains: '', worker_count: 1 }, sslForm: { email: '', domains: '' }, newUser: { username: '', password: '', role: 'admin', email: '' }, pageTitle: 'Dashboard' }" x-init="fetchStats()" class="min-h-screen">
+<body x-data="{ currentPage: 'dashboard', sidebarOpen: false, alert: null, alertType: 'info', stats: { total_websites: 0, active_websites: 0, total_workers: 0, running_workers: 0, ssl_certificates: 0, requests_today: 0, cpu_usage: 0, memory_usage: 0, disk_usage: 0 }, websites: [], sslCerts: [], workers: [], files: [], fileDir: '/', showAddWebsiteModal: false, showAddSslModal: false, showAddUserModal: false, newWebsite: { name: '', domain: '', document_root: '', php_version: '8.3', ssl_enabled: false, acme_email: '', acme_domains: '', worker_count: 1 }, sslForm: { email: '', domains: '' }, newUser: { username: '', password: '', role: 'admin', email: '' }, pageTitle: 'Dashboard', installerServices: [], installerBusy: false, installerMsg: '', installerOk: true, loadInstaller() { this.installerBusy = true; this.installerMsg = ''; fetch('/api/installer/services').then(r=>r.json()).then(d=>{ this.installerServices = d.data || []; this.installerBusy = false; }).catch(e=>{ this.installerMsg = e.message; this.installerOk = false; this.installerBusy = false; }); }, installService(id) { this.installerBusy = true; this.installerMsg = ''; fetch('/api/installer/install', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ service: id }) }).then(r=>r.json()).then(d=>{ this.installerMsg = d.success ? 'Installed ' + id : (d.error || 'Failed'); this.installerOk = d.success; this.installerBusy = false; this.loadInstaller(); }).catch(e=>{ this.installerMsg = e.message; this.installerOk = false; this.installerBusy = false; }); }, uninstallService(id) { this.installerBusy = true; this.installerMsg = ''; fetch('/api/installer/uninstall', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ service: id }) }).then(r=>r.json()).then(d=>{ this.installerMsg = d.success ? 'Uninstalled ' + id : (d.error || 'Failed'); this.installerOk = d.success; this.installerBusy = false; this.loadInstaller(); }).catch(e=>{ this.installerMsg = e.message; this.installerOk = false; this.installerBusy = false; }); } }" x-init="fetchStats()" class="min-h-screen">
 
     <!-- Mobile overlay -->
     <div x-show="sidebarOpen" x-transition @click="sidebarOpen = false" class="ad-mobile-overlay"></div>
@@ -136,6 +136,9 @@ pub fn panel_html() -> String {
             </button>
             <button @click="currentPage='files'; sidebarOpen=false" class="w-full flex items-center gap-3 px-3 py-2.5 text-sm rounded-l-lg transition-colors" :class="{ 'nav-item-active': currentPage === 'files' }">
                 <i class="fa fa-folder w-5 text-gray-400"></i> <span class="text-gray-700 font-medium">File Manager</span>
+            </button>
+            <button @click="currentPage='installer'; sidebarOpen=false; loadInstaller()" class="w-full flex items-center gap-3 px-3 py-2.5 text-sm rounded-l-lg transition-colors" :class="{ 'nav-item-active': currentPage === 'installer' }">
+                <i class="fa fa-download w-5 text-gray-400"></i> <span class="text-gray-700 font-medium">Installer</span>
             </button>
             <button @click="currentPage='users'; sidebarOpen=false" class="w-full flex items-center gap-3 px-3 py-2.5 text-sm rounded-l-lg transition-colors" :class="{ 'nav-item-active': currentPage === 'users' }">
                 <i class="fa fa-users w-5 text-gray-400"></i> <span class="text-gray-700 font-medium">Users</span>
@@ -444,6 +447,40 @@ pub fn panel_html() -> String {
                         </table>
                     </div>
                 </div>
+            </div>
+
+            <!-- Installer -->
+            <div x-show="currentPage === 'installer'" class="space-y-6">
+                <div class="flex justify-between items-center">
+                    <div>
+                        <h2 class="text-2xl font-bold text-gray-900">Installer</h2>
+                        <p class="text-gray-500">Install third-party services/tools via OS package manager (with binary fallback)</p>
+                    </div>
+                    <button @click="loadInstaller()" class="btn-default px-4"><i class="fa fa-sync mr-2"></i> Refresh</button>
+                </div>
+                <div class="bg-white border border-gray-200 rounded-lg overflow-hidden shadow-sm">
+                    <table>
+                        <thead><tr><th>Service</th><th>Description</th><th>Status</th><th>Actions</th></tr></thead>
+                        <tbody>
+                            <template x-for="svc in installerServices" :key="svc.id">
+                                <tr>
+                                    <td class="font-medium text-gray-900" x-text="svc.name"></td>
+                                    <td class="text-sm text-gray-500" x-text="svc.description"></td>
+                                    <td>
+                                        <span class="px-2 py-1 text-xs rounded-full" :class="svc.installed ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-600'" x-text="svc.installed ? 'Installed' : 'Not installed'"></span>
+                                    </td>
+                                    <td class="flex gap-2">
+                                        <button x-show="!svc.installed" @click="installService(svc.id)" class="btn-primary text-xs px-3 py-1">Install</button>
+                                        <button x-show="svc.installed" @click="uninstallService(svc.id)" class="btn-text text-xs text-red-600 px-3 py-1">Uninstall</button>
+                                    </td>
+                                </tr>
+                            </template>
+                            <tr x-show="installerServices.length === 0"><td colspan="4" class="text-center py-12 text-gray-400">Loading...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+                <div x-show="installerBusy" class="text-sm text-blue-600"><i class="fa fa-spinner fa-spin mr-2"></i>Working, please wait...</div>
+                <div x-show="installerMsg" class="text-sm" :class="installerOk ? 'text-green-600' : 'text-red-600'" x-text="installerMsg"></div>
             </div>
 
             <!-- Users -->
