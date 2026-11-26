@@ -11,7 +11,7 @@ Số liệu đo thực tế tại thời điểm viết (2026-11-25, `https://ng
 | Asset tĩnh / edge cache | `x-larva-edge-cache: HIT`, TTFB thường `< 0,15s` |
 | Cert | `CN=nghesachxua.vn`, Let's Encrypt, `openssl verify` trả `0 (ok)` |
 | TCP 80/443 | do tiến trình `larva-php` lắng nghe |
-| UDP 443 | vẫn mở, nhưng **không còn được quảng cáo** cho browser mới |
+| UDP 443 | mở; từ 2026-11-26 16:00 đã **quảng cáo H3** qua `Alt-Svc` |
 
 Kết luận: PHP, static file, edge cache, TLS và mạng TCP đều nhanh. Thời gian treo nằm ở **đường vào HTTP/3 (QUIC)** và cơ chế fallback của browser sau khi đọc `Alt-Svc`.
 
@@ -38,8 +38,8 @@ Kết luận: PHP, static file, edge cache, TLS và mạng TCP đều nhanh. Th�
 
 Hệ quả sau bản sửa:
 
-- `--lets-encrypt` (production hiện tại): UDP listener vẫn chạy, nhưng **không gửi** `Alt-Svc: h3`.
-- `--http3`: bật UDP listener **và** quảng cáo `Alt-Svc: h3=":443"; ma=86400`.
+- Chỉ `--lets-encrypt` (trạng thái trước 2026-11-26 16:00): UDP listener chạy, nhưng **không gửi** `Alt-Svc: h3`.
+- `--lets-encrypt --http3` (production hiện tại): UDP listener **và** quảng cáo `Alt-Svc: h3=":443"; ma=86400`.
 
 ### 1.2. Thread model
 
@@ -227,13 +227,16 @@ HTTP/3 listener active but Alt-Svc advertisement disabled; TCP clients use h2/ht
 HTTP/3 (QUIC) listening on 0.0.0.0:443
 ```
 
+Dòng `Alt-Svc advertisement disabled` chỉ đúng cho giai đoạn chưa bật `--http3`;
+sau 2026-11-26 16:00 chỉ còn dòng `HTTP/3 (QUIC) listening on 0.0.0.0:443`.
+
 Kiểm tra header:
 
 ```bash
 curl -sSI https://nghesachxua.vn/ | grep -iE 'HTTP/|server:|alt-svc'
 # HTTP/2 200
 # server: LarvaPHP
-# (không có alt-svc)
+# alt-svc: h3=":443"; ma=86400   (sau khi bật --http3)
 ```
 
 ALPN và fallback:
@@ -284,7 +287,7 @@ Các mục dưới đây được ghi lại để tránh tưởng rằng bản s
 | BUG-11 | Cert ACME không reload trong H3 | Chưa sửa; cần restart sau renewal hoặc rebuild `quiche::Config` |
 | BUG-13 | 1-RTT H3 request bị drop do version check / sai độ dài DCID | **Đã sửa + có test E2E** (xem mục 11) |
 
-Vì các rủi ro trên, production hiện tại **chủ động không quảng cáo H3**. H3 vẫn có thể bật rõ bằng `--http3` để test có kiểm soát.
+Vì các rủi ro trên, production đã **chủ động không quảng cáo H3** cho đến 2026-11-26 16:00. Sau khi sửa BUG-13 và verify forced QUIC, đã bật rõ `--http3`; vẫn giữ các rủi ro BUG-02/03/05/06/07/11 trong diện theo dõi.
 
 ---
 
@@ -355,11 +358,11 @@ Kỳ vọng:
 - service `active`,
 - `HTTP/2 200`,
 - `server: LarvaPHP`,
-- **không có** `alt-svc`,
 - `--http1.1` cũng trả `200`,
-- log có dòng `Alt-Svc advertisement disabled`.
+- có `alt-svc: h3=":443"; ma=86400` (từ khi bật `--http3`),
+- log có `HTTP/3 (QUIC) listening on 0.0.0.0:443`.
 
-Khi test H3 có chủ đích, dùng một instance riêng với `--http3` và kiểm tra Chrome DevTools → Network → Protocol là `h3`; không kỳ vọng production đang dùng h3.
+Khi test H3, reload trang thứ hai bằng Chrome profile sạch sẽ thấy document và asset là `h3`.
 
 ---
 
@@ -439,7 +442,7 @@ curl -sS -o /dev/null -w '%{http_version} %{http_code}\n' https://127.0.0.1/ -k
 curl -sS -o /dev/null -w '%{http_version} %{http_code}\n' https://nghesachxua.vn/
 ```
 
-Kết quả mong đợi: cả hai vẫn `2 200` trong khi connection stall còn mở. Ngoài ra vẫn giữ `h2=200`, `h1=200`, không có `alt-svc` và `x-larva-edge-cache: HIT`.
+Kết quả mong đợi: cả hai vẫn `2 200` trong khi connection stall còn mở. Ngoài ra vẫn giữ `h2=200`, `h1=200`, `x-larva-edge-cache: HIT` và (sau khi bật `--http3`) có `alt-svc`.
 
 ### Invariant bổ sung
 
@@ -517,8 +520,9 @@ Network blackhole detected: 0
 ```
 
 `curl` thường vẫn báo `h2` vì không hỗ trợ HTTP/3; điều kiện ép QUIC ở trên
-mới là phép thử H3 thật. Production **vẫn không gửi `Alt-Svc`**, nên client
-bình thường tiếp tục dùng h2/h1 và Waterfox không bị ép upgrade.
+là phép thử H3 thật. Tại thời điểm đo đó production **chưa gửi `Alt-Svc`**;
+sau khi bật `--http3` lúc 16:00, client hỗ trợ QUIC dùng h3, client còn lại
+vẫn h2/h1 qua ALPN.
 
 ### Invariant bổ sung
 
@@ -526,3 +530,52 @@ bình thường tiếp tục dùng h2/h1 và Waterfox không bị ép upgrade.
     `version = 0` của short-header không phải "unsupported version".
 13. Khi parse short header, độ dài DCID phải là độ dài SCID local đã dùng lúc
     `quiche::accept()`, không phải `MAX_CONN_ID_LEN` mặc định.
+
+---
+
+## 12. Bật H3 mặc định cho production (2026-11-26 16:00)
+
+### Thay đổi
+
+Chỉ thêm `--http3` vào ExecStart trong
+`/etc/systemd/system/larva-php@nghesachxua.service.d/override.conf`:
+
+```ini
+ExecStart=/usr/local/bin/larva-php \
+    ...
+    --lets-encrypt \
+    --http3 \
+    ...
+```
+
+Backup config: `/etc/systemd/system/larva-php@nghesachxua.service.d/override.conf.bak-20261126-160028`.
+
+Không rebuild binary, không sửa code timeout/TLS. Lý do an toàn:
+
+- UDP listener đã chạy sẵn vì có `--lets-encrypt`.
+- Flag chỉ gọi `set_http3_port()` để thêm `Alt-Svc`; ALPN vẫn là `h2, http/1.1`.
+- Vòng `accept()` TCP và handshake 10s (BUG-12) không bị đụng tới.
+- H3 chạy thread riêng, idle timeout 30s riêng, worker riêng.
+
+### Kết quả verify
+
+```text
+systemctl is-active        → active
+curl -sSI                  → HTTP/2 200 + alt-svc: h3=":443"; ma=86400
+curl --http2 / --http1.1   → 200 / 200
+ss -lntup                  → TCP + UDP 443 do larva-php giữ
+Stalled TCP client 15s     → curl vẫn 2 200
+Chrome profile sạch, load 2:
+  HTTP3_HEADERS_SENT       → :authority nghesachxua.vn, :path /
+  HTTP3_HEADERS_DECODED    → :status 200, server: LarvaPHP,
+                             x-larva-edge-cache: HIT
+  Network blackhole        → 0
+```
+
+Netlog: `/tmp/opencode/quic-default-netlog.json`.
+
+### Rollback
+
+Bỏ flag `--http3`, `daemon-reload`, `restart`. Do `Alt-Svc` được browser cache
+đến `ma=86400`, nếu cần fallback ngay thì chặn UDP/443 tạm bằng nft rồi gỡ sau
+khi cache hết hạn.
