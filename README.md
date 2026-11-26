@@ -259,6 +259,11 @@ See [`docs/troubleshooting.md`](docs/troubleshooting.md) for known issues and
 diagnosis steps, including the HTTP/2 duplicate `Cookie` header bug that caused
 WordPress login loops with `reauth=1`.
 
+## Error Pages
+
+See [`docs/error-pages.md`](docs/error-pages.md) for the shared 40x/50x HTML
+template, header policy and response coverage.
+
 ## License
 
 MIT License. See [LICENSE](LICENSE) for details.
