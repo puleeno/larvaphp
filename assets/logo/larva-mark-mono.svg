@@ -1,0 +1,34 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" fill="none">
+  <title>LarvaPHP Mascot Mark - Pure Monochrome Black (Print, Stamp &amp; CNC)</title>
+  <defs>
+    <mask id="mono-cutouts">
+      <rect width="256" height="256" fill="#ffffff"/>
+      <!-- Twin pill eyes (negative-space cutouts) -->
+      <rect x="72" y="80" width="14" height="28" rx="7" fill="#000000"/>
+      <rect x="96" y="80" width="14" height="28" rx="7" fill="#000000"/>
+      <!-- Two clean diagonal negative-space tail stripes -->
+      <polygon points="116,216 154,152 167,152 129,216" fill="#000000"/>
+      <polygon points="142,216 180,152 193,152 155,216" fill="#000000"/>
+    </mask>
+  </defs>
+
+  <g mask="url(#mono-cutouts)" fill="#000000">
+    <!-- Antenna & orb -->
+    <path d="M90 58 C94 38, 108 29, 130 30" stroke="#000000" stroke-width="10" stroke-linecap="round" fill="none"/>
+    <circle cx="136" cy="30" r="11"/>
+    <!-- Abstract L-shaped larva silhouette -->
+    <path d="
+      M52 178
+      V104
+      C52 72, 70 54, 92 54
+      C114 54, 128 72, 128 104
+      V136
+      C128 148, 134 154, 146 154
+      H174
+      C194 154, 206 166, 206 184
+      C206 202, 194 214, 174 214
+      H88
+      C66 214, 52 200, 52 178
+      Z"/>
+  </g>
+</svg>

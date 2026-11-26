@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" fill="none">
+  <title>LarvaPHP Circular Rubber Stamp Seal (Pure Black &amp; White)</title>
+  <defs>
+    <path id="stamp-top-arc" d="M40,128 A88,88 0 1,1 216,128"/>
+    <path id="stamp-bot-arc" d="M216,128 A88,88 0 1,1 40,128"/>
+    <mask id="stamp-mascot-cutouts">
+      <rect width="256" height="256" fill="#ffffff"/>
+      <rect x="72" y="80" width="14" height="28" rx="7" fill="#000000"/>
+      <rect x="96" y="80" width="14" height="28" rx="7" fill="#000000"/>
+      <polygon points="116,216 154,152 167,152 129,216" fill="#000000"/>
+      <polygon points="142,216 180,152 193,152 155,216" fill="#000000"/>
+    </mask>
+  </defs>
+
+  <!-- Bold 1-bit stamp rings -->
+  <circle cx="128" cy="128" r="118" stroke="#000000" stroke-width="6.5"/>
+  <circle cx="128" cy="128" r="105" stroke="#000000" stroke-width="2.5" stroke-dasharray="14 6"/>
+  <circle cx="128" cy="128" r="72" stroke="#000000" stroke-width="3"/>
+
+  <!-- Curved stamp text -->
+  <text font-family="Inter, Arial, sans-serif" font-size="18" font-weight="800" letter-spacing="4" fill="#000000" text-anchor="middle">
+    <textPath href="#stamp-top-arc" startOffset="50%">LARVAPHP</textPath>
+  </text>
+  <text font-family="Inter, Arial, sans-serif" font-size="11.5" font-weight="700" letter-spacing="2.8" fill="#000000" text-anchor="middle">
+    <textPath href="#stamp-bot-arc" startOffset="50%">PHP WEB SERVER</textPath>
+  </text>
+
+  <!-- Centered monochrome mascot -->
+  <g transform="translate(69, 69) scale(0.46)" mask="url(#stamp-mascot-cutouts)" fill="#000000">
+    <path d="M90 58 C94 38, 108 29, 130 30" stroke="#000000" stroke-width="10" stroke-linecap="round" fill="none"/>
+    <circle cx="136" cy="30" r="11"/>
+    <path d="
+      M52 178 V104 C52 72, 70 54, 92 54 C114 54, 128 72, 128 104 V136
+      C128 148, 134 154, 146 154 H174 C194 154, 206 166, 206 184
+      C206 202, 194 214, 174 214 H88 C66 214, 52 200, 52 178 Z"/>
+  </g>
+</svg>
