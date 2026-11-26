@@ -12,6 +12,7 @@ use axum::{
 use tower_http::cors::CorsLayer;
 use serde::Deserialize;
 use crate::db::PanelDb;
+use crate::installer::PackageManager;
 use crate::api::{
     Website, CreateWebsite, UpdateWebsite, SslCertificate, AcmeRequest,
     WorkerStatus, DashboardStats, User, CreateUser, LoginRequest, LoginResponse,
@@ -104,6 +105,9 @@ impl PanelState {
             .route("/api/users", get(list_users).post(create_user))
             .route("/api/files", get(list_files))
             .route("/api/settings", get(list_settings).put(update_setting))
+            .route("/api/installer/services", get(list_installer_services))
+            .route("/api/installer/install", post(install_service))
+            .route("/api/installer/uninstall", post(uninstall_service))
             .route("/api/auth/login", post(login))
             .fallback(spa_fallback)
             .with_state(self)
@@ -606,6 +610,40 @@ async fn login(
             api_json(LoginResponse { token, user })
         }
         Err(_) => api_err("Invalid credentials"),
+    }
+}
+
+// ============================================================================
+// Installer Handlers
+// ============================================================================
+
+#[derive(serde::Deserialize)]
+struct InstallRequest {
+    service: String,
+}
+
+async fn list_installer_services() -> Json<ApiResponse<Vec<crate::installer::Service>>> {
+    let services = crate::installer::services::catalog();
+    Json(ApiResponse { success: true, data: Some(services), error: None })
+}
+
+async fn install_service(
+    Json(req): Json<InstallRequest>,
+) -> Json<ApiResponse<String>> {
+    let pm = crate::installer::OsPackageManager::new();
+    match pm.install(&req.service) {
+        Ok(out) => Json(ApiResponse { success: true, data: Some(out), error: None }),
+        Err(e) => Json(ApiResponse { success: false, data: None, error: Some(e) }),
+    }
+}
+
+async fn uninstall_service(
+    Json(req): Json<InstallRequest>,
+) -> Json<ApiResponse<String>> {
+    let pm = crate::installer::OsPackageManager::new();
+    match pm.uninstall(&req.service) {
+        Ok(out) => Json(ApiResponse { success: true, data: Some(out), error: None }),
+        Err(e) => Json(ApiResponse { success: false, data: None, error: Some(e) }),
     }
 }
 
