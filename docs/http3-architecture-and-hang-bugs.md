@@ -504,9 +504,21 @@ google-chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage 
   --virtual-time-budget=5000 --dump-dom https://nghesachxua.vn/
 ```
 
-Trong net log mới phải có `:status` / `HTTP3_HEADERS_RECEIVED` và không còn
-`Network blackhole detected`. Production **vẫn không gửi `Alt-Svc`**; chỉ test
-ép QUIC mới dùng H3.
+Kết quả đo sau khi deploy binary `4cae7221c6c282808d6ddb32ecdb6d8b`
+(backup: `/usr/local/bin/larva-php.bak-20261126-113534`):
+
+```text
+HTTP3_HEADERS_SENT: :authority nghesachxua.vn, :path /
+HTTP3_HEADERS_DECODED: :status 200, server: LarvaPHP,
+                        x-larva-edge-cache: HIT, content-length: 124887
+peer_address: 103.238.234.195:443
+Response có header LarvaPHP: 12
+Network blackhole detected: 0
+```
+
+`curl` thường vẫn báo `h2` vì không hỗ trợ HTTP/3; điều kiện ép QUIC ở trên
+mới là phép thử H3 thật. Production **vẫn không gửi `Alt-Svc`**, nên client
+bình thường tiếp tục dùng h2/h1 và Waterfox không bị ép upgrade.
 
 ### Invariant bổ sung
 
