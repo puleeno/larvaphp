@@ -1,27 +1,35 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 680 180" fill="none">
-  <title>LarvaPHP Horizontal Brand Lockup</title>
+  <title>LarvaPHP Horizontal Lockup - Larva x Purple ElePHPant</title>
   <defs>
-    <mask id="lockup-tail-cuts">
+    <mask id="lockup-larva-cuts">
       <rect width="256" height="256" fill="#ffffff"/>
-      <polygon points="116,216 154,152 167,152 129,216" fill="#000000"/>
-      <polygon points="142,216 180,152 193,152 155,216" fill="#000000"/>
+      <polygon points="82,164 118,124 130,124 94,164" fill="#000000"/>
+      <polygon points="103,168 139,128 151,128 115,168" fill="#000000"/>
+    </mask>
+    <mask id="lockup-elephant-eye">
+      <rect width="256" height="256" fill="#ffffff"/>
+      <circle cx="176" cy="122" r="5.5" fill="#000000"/>
     </mask>
   </defs>
 
-  <!-- Mascot Icon -->
-  <g transform="translate(20, 14) scale(0.6)">
-    <path d="M90 58 C94 38, 108 29, 130 30" stroke="#F59E0B" stroke-width="10" stroke-linecap="round"/>
-    <circle cx="136" cy="30" r="11" fill="#F59E0B"/>
-    <path mask="url(#lockup-tail-cuts)" fill="#F59E0B" d="
-      M52 178 V104 C52 72, 70 54, 92 54 C114 54, 128 72, 128 104 V136
-      C128 148, 134 154, 146 154 H174 C194 154, 206 166, 206 184
-      C206 202, 194 214, 174 214 H88 C66 214, 52 200, 52 178 Z"/>
-    <rect x="72" y="80" width="14" height="28" rx="7" fill="#0F172A"/>
-    <rect x="96" y="80" width="14" height="28" rx="7" fill="#0F172A"/>
+  <g transform="translate(12, 12) scale(0.62)">
+    <path d="M92 56 C96 36, 110 28, 128 29" stroke="#F59E0B" stroke-width="9.5" stroke-linecap="round"/>
+    <circle cx="134" cy="29" r="9.5" fill="#F59E0B"/>
+    <path mask="url(#lockup-larva-cuts)" fill="#F59E0B" d="
+      M68 122 V90 C68 66, 82 54, 98 54 C114 54, 124 68, 124 90 V114
+      C124 126, 134 132, 148 132 C142 152, 118 164, 94 160 C76 156, 68 140, 68 122 Z"/>
+    <rect x="81" y="76" width="11" height="22" rx="5.5" fill="#0F172A"/>
+    <rect x="100" y="76" width="11" height="22" rx="5.5" fill="#0F172A"/>
+    <path mask="url(#lockup-elephant-eye)" fill="#6D5DF6" d="
+      M56 124 C58 148, 72 170, 102 172 C132 174, 150 156, 156 134
+      C142 126, 136 112, 138 98 C144 86, 162 84, 178 94 C192 103, 198 122, 196 142
+      C198 152, 206 154, 210 142 C212 135, 218 132, 224 134 C229 136, 230 144, 227 153
+      C220 172, 200 178, 174 170 V204 C174 212, 168 216, 160 216 H138
+      C130 216, 126 212, 126 204 V194 C126 184, 100 184, 100 194 V204
+      C100 212, 95 216, 87 216 H66 C58 216, 52 210, 52 200 V146 C52 136, 53 128, 56 124 Z"/>
   </g>
 
-  <!-- Geometric Wordmark -->
   <text x="190" y="114" font-family="Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="70" font-weight="800" letter-spacing="-2.5" fill="#0F172A">
-    Larva<tspan fill="#F59E0B">PHP</tspan>
+    Larva<tspan fill="#6D5DF6">PHP</tspan>
   </text>
 </svg>
