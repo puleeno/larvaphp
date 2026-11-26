@@ -371,3 +371,75 @@ Server không chậm; **luồng HTTP/3 chỉ gửi response khi nhận thêm gó
 ## 9. Phạm vi thay đổi ngoài repo này
 
 Tối ưu LCP/Network dependency tree cho `nghesachxua.vn` (`fetchpriority="high"`, preload ảnh + `scroll.js`, defer `scroll.js`, preconnect `images.unsplash.com`) nằm ở document root WordPress `/home/nghesachxua/nghesachxua.vn`, **không nằm trong repo `larvaphp`** và không được commit cùng 2 commit dưới đây.
+
+---
+
+## 10. BUG-12: TLS handshake chặn vòng accept TCP
+
+### Triệu chứng
+
+- `systemctl status larva-php@nghesachxua` vẫn `active (running)`, CPU tích lũy thấp, RAM ~350 MB, `free -m` thoải mái.
+- HTTP/1.1 qua cổng **80** vẫn trả `301` bình thường.
+- Mọi kết nối tới cổng **443** (kể cả `https://127.0.0.1/`) đều `Connection timed out`.
+- `ss -tulpn` cho thấy hàng đợi accept đầy: `LISTEN 129 128 0.0.0.0:443`.
+- Một vài connection `ESTABLISHED` tới `:443` có `Recv-Q` lớn (`1479–1534` byte) nhưng `Send-Q = 0`.
+- Journal không có log mới; dòng cuối cùng là `Connection error: received fatal alert: BadCertificate` từ ~9 giờ trước.
+
+### Nguyên nhân
+
+Trước bản sửa, `Server::start_server_inner()` chạy TLS handshake **ngay trong vòng lặp accept**:
+
+```rust
+loop {
+    let (stream, _) = listener.accept().await?;
+    let stream = acceptor.accept(stream).await?;   // ◄── chặn toàn bộ vòng lặp
+    tokio::spawn(async move { /* serve_connection */ });
+}
+```
+
+Chỉ cần một client hoàn tất TCP nhưng không gửi ( hoặc gửi chậm ) `ClientHello` là `acceptor.accept()` treo vô thời hạn. Vòng lặp không gọi `accept()` nữa → kernel đổ đầy backlog (128) → SYNs bị drop → mọi client mới thấy timeout. Process vẫn `active`, không crash, không tăng CPU/RAM, nên `htop` và `free -m` nhìn rất "bình thường".
+
+Chuỗi sự kiện thực tế tại production:
+
+```text
+22:19:37  service start, listener active
+22:19:54 → 22:53:58  bot gửi "fatal alert: BadCertificate" mỗi ~2 phút
+22:53:58  connection cuối cùng làm handshake treo; không còn log nào sau đó
+07:54    ss: LISTEN Recv-Q=129/128, curl 127.0.0.1:443 timeout
+```
+
+### Cách sửa (đã deploy)
+
+Chuyển handshake vào task riêng và giới hạn thời gian 10 giây:
+
+```rust
+let tls_acceptor = tls_acceptor.clone();
+tokio::spawn(async move {
+    let stream = match tokio::time::timeout(
+        Duration::from_secs(10),
+        acceptor.accept(stream),
+    ).await {
+        Ok(Ok(s)) => ConnectionStream::Tls(s),
+        Ok(Err(e)) => { debug!("TLS handshake failed: {}", e); return; }
+        Err(_) => { debug!("TLS handshake timed out"); return; }
+    };
+    /* serve_connection như cũ */
+});
+```
+
+Bất kỳ client nào treo handshake cũng chỉ làm chậm chính connection của nó. Vòng `accept()` luôn chạy, có thể phục vụ các client khỏe mạnh khác.
+
+### Kiểm tra sau deploy
+
+```bash
+# Client giữ TCP nhưng không gửi ClientHello
+python3 -c 'import socket,time; s=socket.create_connection(("127.0.0.1",443)); time.sleep(20)' &
+curl -sS -o /dev/null -w '%{http_version} %{http_code}\n' https://127.0.0.1/ -k
+curl -sS -o /dev/null -w '%{http_version} %{http_code}\n' https://nghesachxua.vn/
+```
+
+Kết quả mong đợi: cả hai vẫn `2 200` trong khi connection stall còn mở. Ngoài ra vẫn giữ `h2=200`, `h1=200`, không có `alt-svc` và `x-larva-edge-cache: HIT`.
+
+### Invariant bổ sung
+
+11. Không `await` bất kỳ thao tác handshake/I/O nào của một connection trong vòng lặp `accept()`; mọi connection chậm phải tách sang task riêng có timeout.
