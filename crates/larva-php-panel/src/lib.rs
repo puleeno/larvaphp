@@ -5,6 +5,7 @@ pub mod api;
 pub mod db;
 pub mod html;
 pub mod installer;
+pub mod modules;
 pub mod server;
 
 use std::sync::Arc;

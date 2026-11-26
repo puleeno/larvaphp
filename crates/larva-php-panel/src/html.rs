@@ -715,7 +715,10 @@ pub fn panel_html() -> String {
                     </div>
                     <button @click="refreshAll()" class="btn-default text-sm inline-flex items-center gap-2">
                         <i class="fa fa-sync-alt" :class="{ 'animate-spin': isRefreshing }"></i>
-                        <span>Refresh</span>
+                        <span x-text="isRefreshing ? 'Refreshing...' : 'Refresh'"></span>
+                    </button>
+                    <button @click="forceReloadServer()" class="btn-primary text-sm inline-flex items-center gap-2">
+                        <i class="fa fa-redo"></i> Force Reload Server
                     </button>
                 </div>
 
@@ -1596,6 +1599,15 @@ pub fn panel_html() -> String {
                     } finally {
                         setTimeout(() => { this.isRefreshing = false; }, 350);
                     }
+                },
+
+                async forceReloadServer() {
+                    try {
+                        const r = await fetch('/api/server/reload', { method: 'POST' });
+                        const d = await r.json();
+                        alert(d.success ? 'Server reloaded' : (d.error || 'Failed'));
+                        await this.refreshAll();
+                    } catch (e) { alert('Error: ' + e.message); }
                 },
 
                 async fetchStats() {
