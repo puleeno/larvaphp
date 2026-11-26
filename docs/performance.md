@@ -2,6 +2,9 @@
 
 LarvaPHP's request path and how to get the most out of it, with measured numbers.
 
+Connection/request state isolation tests are documented in
+[`connection-isolation.md`](connection-isolation.md).
+
 ## TL;DR
 
 - **Static files** (css/js/images): **~3 ms** — the server is not the bottleneck.
