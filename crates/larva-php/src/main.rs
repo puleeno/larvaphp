@@ -604,7 +604,20 @@ fn main() -> ExitCode {
                         key,
                         std::sync::Arc::new(larva_php::server::Server::new(&root).unwrap()),
                     );
-                    larva_php::server::set_http3_port(addr.port());
+                    // Only advertise HTTP/3 when the operator explicitly asked
+                    // for it (`--http3`). `--lets-encrypt` implicitly starts the
+                    // UDP listener for backwards compatibility, but browsers
+                    // that see `Alt-Svc: h3=...` (notably Waterfox/Firefox) may
+                    // try QUIC and then stall instead of falling back quickly.
+                    // Keeping the header off lets ALPN pick h2, or http/1.1
+                    // when the client does not support h2.
+                    if args.http3 {
+                        larva_php::server::set_http3_port(addr.port());
+                    } else {
+                        tracing::info!(
+                            "HTTP/3 listener active but Alt-Svc advertisement disabled; TCP clients use h2/http/1.1"
+                        );
+                    }
                     std::thread::spawn(move || {
                         if let Err(e) = h3.run() {
                             eprintln!("HTTP/3 server error: {}", e);

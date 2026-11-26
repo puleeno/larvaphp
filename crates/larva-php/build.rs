@@ -15,8 +15,15 @@ fn main() {
 
     #[cfg(target_os = "macos")]
     {
-        let php_lib_dir = std::env::var("PHP_LIB_DIR")
-            .unwrap_or_else(|_| "/usr/local/opt/php/lib".to_string());
+        let php_lib_dir = std::env::var("PHP_LIB_DIR").unwrap_or_else(|_| {
+            let lib = std::env::var("PHP_EMBED_LIB").unwrap_or_else(|_| "php8.3".to_string());
+            for dir in ["/opt/homebrew/lib", "/usr/local/lib", "/usr/local/opt/php/lib"] {
+                if std::path::Path::new(dir).join(format!("lib{}.dylib", lib)).exists() {
+                    return dir.to_string();
+                }
+            }
+            "/usr/local/opt/php/lib".to_string()
+        });
         println!("cargo:rustc-link-arg-bins=-Wl,-rpath,{}", php_lib_dir);
     }
 }

@@ -2,6 +2,9 @@
 
 LarvaPHP's request path and how to get the most out of it, with measured numbers.
 
+Connection/request state isolation tests are documented in
+[`connection-isolation.md`](connection-isolation.md).
+
 ## TL;DR
 
 - **Static files** (css/js/images): **~3 ms** — the server is not the bottleneck.
@@ -63,6 +66,20 @@ a connection pool, so it is ready for `php-fpm` on Linux.
 | Rate limiter via `Arc<DashMap>` | `server.rs` | lock-free per-IP counter |
 | `ArcSwap` config hot-reload | `watcher.rs` | lock-free config reads |
 | FastCGI connection pool | `fastcgi.rs` | reuse TCP connection (Linux) |
+| Edge cache (Jankx page cache) | `edge_cache.rs`, `server.rs` | serve rendered pages without starting PHP |
+| Cached standard-level gzip | `server.rs` | smaller HTML responses; recompressed only on cache change |
+
+## Edge-cache compression
+
+`LARVA_EDGE_CACHE` lets LarvaPHP read Jankx's serialized page cache before PHP
+starts. The decoded HTML is compressed once and stored in `GZIP_CACHE`, keyed by
+the cache file and its source length; a changed page is recompressed on the next
+request.
+
+The gzip result uses `Compression::default()` rather than `Compression::fast()`.
+On a real WordPress homepage this reduced the response from **37.3 KB to 27.4 KB**
+gzip (124,835 bytes of HTML) with no per-request compression cost. This matters
+most on mobile profiles where the document itself is on the critical path.
 
 ## How to make PHP fast
 

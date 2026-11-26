@@ -9,7 +9,7 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::{Arc, OnceLock, RwLock};
 use std::task::{Context, Poll};
-use std::time::{SystemTime, UNIX_EPOCH, Instant};
+use std::time::{Duration, SystemTime, UNIX_EPOCH, Instant};
 use std::io::Write;
 use bytes::Bytes;
 use flate2::{write::GzEncoder, Compression};
@@ -699,19 +699,25 @@ impl Server {
                         .header("content-type", "text/plain; charset=UTF-8")
                         .header("content-length", content.len().to_string())
                         .header("server", "LarvaPHP")
-                        .body(Full::new(Bytes::from(content)))
+                        .body(Full::new(body_for_head(
+                            req.method().as_str(),
+                            Bytes::from(content),
+                        )))
                         .unwrap());
                 }
             }
             // No robots.txt on disk — serve a permissive default
             // so WordPress doesn't try to generate one.
-            let default = b"User-agent: *\nDisallow: /\n";
+            let default = b"User-agent: *\nAllow: /\n";
             return Ok(Response::builder()
                 .status(StatusCode::OK)
                 .header("content-type", "text/plain; charset=UTF-8")
                 .header("content-length", default.len().to_string())
                 .header("server", "LarvaPHP")
-                .body(Full::new(Bytes::from(default.to_vec())))
+                .body(Full::new(body_for_head(
+                    req.method().as_str(),
+                    Bytes::from(default.to_vec()),
+                )))
                 .unwrap());
         }
 
@@ -790,7 +796,10 @@ impl Server {
                         .header("content-type", "text/plain; charset=UTF-8")
                         .header("content-length", content.len().to_string())
                         .header("server", "LarvaPHP")
-                        .body(Full::new(Bytes::from(content)))
+                        .body(Full::new(body_for_head(
+                            req.method().as_str(),
+                            Bytes::from(content),
+                        )))
                         .unwrap());
                 }
             }
@@ -877,11 +886,11 @@ impl Server {
                             ("content-length".to_string(), content.len().to_string()),
                             ("server".to_string(), "LarvaPHP".to_string()),
                         ],
-                        content,
+                        body_vec_for_head(method, content),
                     ));
                 }
             }
-            let default = b"User-agent: *\nDisallow: /\n".to_vec();
+            let default = b"User-agent: *\nAllow: /\n".to_vec();
             return Ok((
                 StatusCode::OK,
                 vec![
@@ -889,7 +898,7 @@ impl Server {
                     ("content-length".to_string(), default.len().to_string()),
                     ("server".to_string(), "LarvaPHP".to_string()),
                 ],
-                default,
+                body_vec_for_head(method, default),
             ));
         }
 
@@ -1146,6 +1155,30 @@ impl Server {
             let vhosts = vhosts.clone();
 
             tokio::spawn(async move {
+                #[cfg(feature = "tls")]
+                let stream = if let Some(acceptor) = &tls_acceptor {
+                    match tokio::time::timeout(
+                        Duration::from_secs(10),
+                        acceptor.accept(stream),
+                    )
+                    .await
+                    {
+                        Ok(Ok(stream)) => ConnectionStream::Tls(stream),
+                        Ok(Err(e)) => {
+                            tracing::debug!("TLS handshake failed from {}: {}", peer_addr, e);
+                            return;
+                        }
+                        Err(_) => {
+                            tracing::debug!("TLS handshake timed out from {}", peer_addr);
+                            return;
+                        }
+                    }
+                } else {
+                    ConnectionStream::Plain(stream)
+                };
+                #[cfg(not(feature = "tls"))]
+                let stream = ConnectionStream::Plain(stream);
+
                 let io = TokioIo::new(stream);
                 if let Err(err) = auto::Builder::new(hyper_util::rt::TokioExecutor::new())
                     .serve_connection(
@@ -1265,26 +1298,32 @@ impl Server {
                             .header("content-type", "text/plain; charset=UTF-8")
                             .header("content-length", content.len().to_string())
                             .header("server", "LarvaPHP")
-                            .body(Full::new(Bytes::from(content)))
+                            .body(Full::new(body_for_head(
+                                req.method().as_str(),
+                                Bytes::from(content),
+                            )))
                             .unwrap(),
                     );
                 }
             }
             // No robots.txt on disk — serve a permissive default
             // so WordPress doesn't try to generate one.
-            let default = b"User-agent: *\nDisallow: /\n";
+            let default = b"User-agent: *\nAllow: /\n";
             return Ok::<Response<Full<Bytes>>, hyper::Error>(
                 Response::builder()
                     .status(StatusCode::OK)
                     .header("content-type", "text/plain; charset=UTF-8")
                     .header("content-length", default.len().to_string())
                     .header("server", "LarvaPHP")
-                    .body(Full::new(Bytes::from(default.to_vec())))
+                    .body(Full::new(body_for_head(
+                        req.method().as_str(),
+                        Bytes::from(default.to_vec()),
+                    )))
                     .unwrap(),
             );
-        }
+            }
 
-        let script_path = if let Some(ws) = worker_script {
+            let script_path = if let Some(ws) = worker_script {
             Some(ws)
         } else {
             let resolved =
@@ -2380,6 +2419,24 @@ fn static_response(status: StatusCode, headers: Vec<(&str, String)>, body: Bytes
     }
 }
 
+/// A HEAD response keeps the representation headers but must not carry a body.
+fn body_for_head(method: &str, body: Bytes) -> Bytes {
+    if method.eq_ignore_ascii_case("HEAD") {
+        Bytes::new()
+    } else {
+        body
+    }
+}
+
+/// Transport-agnostic counterpart of `body_for_head` for HTTP/3 parts.
+fn body_vec_for_head(method: &str, body: Vec<u8>) -> Vec<u8> {
+    if method.eq_ignore_ascii_case("HEAD") {
+        Vec::new()
+    } else {
+        body
+    }
+}
+
 /// Cached gzip variant of a static file. Invalidated by (mtime, size), so a
 /// changed asset is recompressed on the next request without a manual purge.
 #[derive(Clone)]
@@ -2397,7 +2454,10 @@ fn gzip_cache() -> &'static DashMap<String, CachedGzip> {
 }
 
 fn gzip_bytes(data: &[u8]) -> Result<Bytes> {
-    let mut encoder = GzEncoder::new(Vec::with_capacity(data.len() / 2), Compression::fast());
+    // Cached HTML dominates the mobile critical path. A standard compression
+    // level saves ~10KB on the homepage response without recalculating per
+    // request, because the result is kept in GZIP_CACHE.
+    let mut encoder = GzEncoder::new(Vec::with_capacity(data.len() / 2), Compression::default());
     encoder.write_all(data).map_err(Error::Io)?;
     Ok(Bytes::from(encoder.finish().map_err(Error::Io)?))
 }
@@ -2427,11 +2487,26 @@ fn cached_gzip(path: &str, mtime: u64, size: u64) -> Result<Bytes> {
     Ok(body)
 }
 
+/// FNV-1a 64-bit hash. Used to distinguish in-memory cache payloads that have
+/// the same source path and length but different bytes; without this, a Jankx
+/// cache file rewritten with the same length would keep serving stale HTML to
+/// every connection.
+fn payload_hash(data: &[u8]) -> u64 {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in data {
+        hash ^= *byte as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
 /// Gzip an in-memory response (used by the edge cache) with the same bounded
-/// cache as static files.
+/// cache as static files. The cache key includes a content hash so two
+/// concurrent connections can never receive each other's payload.
 fn cached_gzip_bytes(key: &str, data: &[u8]) -> Result<Bytes> {
     let cache = gzip_cache();
-    if let Some(entry) = cache.get(key) {
+    let cache_key = format!("{}#{:016x}", key, payload_hash(data));
+    if let Some(entry) = cache.get(&cache_key) {
         if entry.size == data.len() as u64 {
             return Ok(entry.body.clone());
         }
@@ -2442,7 +2517,7 @@ fn cached_gzip_bytes(key: &str, data: &[u8]) -> Result<Bytes> {
         cache.clear();
     }
     cache.insert(
-        key.to_string(),
+        cache_key,
         CachedGzip {
             mtime: 0,
             size: data.len() as u64,
@@ -2490,10 +2565,15 @@ fn edge_cache_response(page: &CachedPage, method: &str, accepts_gzip: bool) -> R
         .unwrap()
 }
 
-/// WordPress adds `?ver=` (and similar) to versioned assets, whose URL changes
-/// when the file changes: those can be cached permanently. Unversioned files
-/// get a shorter lifetime so deployments are still picked up quickly.
+/// WordPress uploads are content-addressed by filename in practice: replacing
+/// an image creates a new attachment file. They can be cached permanently.
+/// Versioned theme/plugin assets (`?ver=`) are equally safe. Other unversioned
+/// files keep a short lifetime so deployments are still picked up quickly.
 fn static_cache_control(uri: &str) -> &'static str {
+    if uri.contains("/wp-content/uploads/") {
+        return "public, max-age=31536000, immutable";
+    }
+
     let query = uri.split_once('?').map(|(_, q)| q).unwrap_or("");
     let versioned = query.split('&').any(|pair| {
         let key = pair.split_once('=').map(|(k, _)| k).unwrap_or(pair);
@@ -2928,6 +3008,29 @@ fn is_sensitive_file(path: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Read;
+    use std::sync::atomic::AtomicUsize;
+
+    static TEST_DIR_SEQ: AtomicUsize = AtomicUsize::new(0);
+
+    fn unique_temp_dir(prefix: &str) -> PathBuf {
+        let seq = TEST_DIR_SEQ.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "larva-{}-{}-{}",
+            prefix,
+            std::process::id(),
+            seq
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn gunzip(bytes: &Bytes) -> Vec<u8> {
+        let mut decoder = flate2::read::GzDecoder::new(&bytes[..]);
+        let mut out = Vec::new();
+        decoder.read_to_end(&mut out).unwrap();
+        out
+    }
 
     #[test]
     fn combine_cookie_header_values_joins_repeated_fields() {
@@ -3451,6 +3554,27 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn uploads_get_long_cache_without_version_query() {
+        let dir = std::env::temp_dir().join(format!("larva-upload-cache-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("placeholder-image-1.png");
+        std::fs::write(&path, b"\x89PNG\r\n\x1a\n").unwrap();
+
+        let resp = serve_static_file_parts(
+            &path.to_string_lossy(),
+            "GET",
+            &hyper::HeaderMap::new(),
+            "/wp-content/uploads/2026/11/placeholder-image-1.png",
+        )
+        .unwrap();
+
+        assert!(resp.headers.iter().any(|(n, v)| n == "cache-control"
+            && v == "public, max-age=31536000, immutable"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     // === handle_request_parts tests (HTTP/3 core) ===
 
     #[test]
@@ -3674,5 +3798,125 @@ mod tests {
         let router = VHostRouter::new(vec![]);
         assert!(router.default_vhost().is_none());
         assert!(router.is_empty());
+    }
+
+    #[test]
+    fn head_helpers_remove_body_without_touching_content_length() {
+        assert!(body_for_head("HEAD", Bytes::from_static(b"abc")).is_empty());
+        assert_eq!(&body_for_head("GET", Bytes::from_static(b"abc"))[..], b"abc");
+        assert!(body_vec_for_head("head", b"abc".to_vec()).is_empty());
+        assert_eq!(body_vec_for_head("POST", b"abc".to_vec()), b"abc");
+    }
+
+    // === Connection / state isolation ===
+
+    #[test]
+    fn rate_limiter_state_is_scoped_to_each_ip() {
+        let limiter = RateLimiter::new(RateLimitConfig {
+            max_requests: 2,
+            window_secs: 60,
+        });
+
+        assert!(limiter.check("10.0.0.1"));
+        assert!(limiter.check("10.0.0.1"));
+        assert!(!limiter.check("10.0.0.1"), "third request must be limited");
+
+        // A different client must not inherit the first client's counter.
+        assert!(limiter.check("10.0.0.2"));
+        assert!(limiter.check("10.0.0.2"));
+        assert!(!limiter.check("10.0.0.2"));
+    }
+
+    #[test]
+    fn cached_gzip_bytes_isolates_equal_length_payloads() {
+        const N: usize = 12;
+        let payloads: Vec<(String, Vec<u8>)> = (0..N)
+            .map(|i| {
+                (
+                    format!("edge/page-{}", i),
+                    vec![b'a' + i as u8; 256],
+                )
+            })
+            .collect();
+
+        std::thread::scope(|scope| {
+            for (key, data) in &payloads {
+                let key = key.clone();
+                let data = data.clone();
+                scope.spawn(move || {
+                    let compressed = cached_gzip_bytes(&key, &data).unwrap();
+                    assert_eq!(gunzip(&compressed), data, "gzip cache mixed payloads");
+                });
+            }
+        });
+    }
+
+    #[test]
+    fn cached_gzip_bytes_invalidates_same_length_content_change() {
+        let first = vec![b'x'; 128];
+        let second = vec![b'y'; 128];
+
+        let gz_first = cached_gzip_bytes("edge/rewritten", &first).unwrap();
+        assert_eq!(gunzip(&gz_first), first);
+
+        // Same path, same length, different bytes: must not serve stale HTML.
+        let gz_second = cached_gzip_bytes("edge/rewritten", &second).unwrap();
+        assert_eq!(gunzip(&gz_second), second);
+        assert_ne!(gz_first, gz_second);
+    }
+
+    #[test]
+    fn concurrent_handle_request_parts_keep_each_response_isolated() {
+        const N: usize = 16;
+        let dir = unique_temp_dir("h3-concurrent");
+        for i in 0..N {
+            std::fs::write(dir.join(format!("page-{}.txt", i)), format!("payload-{}", i)).unwrap();
+        }
+
+        let server = Arc::new(Server::new(&dir.to_string_lossy()).unwrap());
+        std::thread::scope(|scope| {
+            for i in 0..N {
+                let server = server.clone();
+                scope.spawn(move || {
+                    let uri = format!("/page-{}.txt", i);
+                    let (status, _, body) =
+                        server.handle_request_parts("GET", &uri, &[], &[]).unwrap();
+                    assert_eq!(status, StatusCode::OK);
+                    assert_eq!(body, format!("payload-{}", i).as_bytes());
+                });
+            }
+        });
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn concurrent_handle_request_parts_isolate_request_headers() {
+        const N: usize = 12;
+        let dir = unique_temp_dir("h3-headers");
+        for i in 0..N {
+            std::fs::write(dir.join(format!("asset-{}.txt", i)), format!("asset-{}", i)).unwrap();
+        }
+
+        let server = Arc::new(Server::new(&dir.to_string_lossy()).unwrap());
+        std::thread::scope(|scope| {
+            for i in 0..N {
+                let server = server.clone();
+                scope.spawn(move || {
+                    let uri = format!("/asset-{}.txt", i);
+                    let headers = vec![
+                        ("x-request-id".to_string(), format!("req-{}", i)),
+                        ("host".to_string(), format!("tenant-{}.example", i)),
+                    ];
+                    let (status, _, body) = server
+                        .handle_request_parts("GET", &uri, &headers, &[])
+                        .unwrap();
+                    assert_eq!(status, StatusCode::OK);
+                    assert_eq!(body, format!("asset-{}", i).as_bytes());
+                });
+            }
+        });
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
