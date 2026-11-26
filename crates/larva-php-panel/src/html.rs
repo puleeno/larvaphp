@@ -880,6 +880,7 @@ pub fn panel_html() -> String {
                                     <th>PHP Version</th>
                                     <th>SSL</th>
                                     <th>Workers</th>
+                                    <th>Port</th>
                                     <th>Status</th>
                                     <th>Actions</th>
                                 </tr>
@@ -895,6 +896,7 @@ pub fn panel_html() -> String {
                                         <td><span class="badge badge-primary font-mono" x-text="'PHP ' + site.php_version"></span></td>
                                         <td><span class="badge" :class="site.ssl_enabled ? 'badge-success' : 'badge-default'" x-text="site.ssl_enabled ? 'Active' : 'Inactive'"></span></td>
                                         <td class="font-mono text-sm" x-text="site.worker_count"></td>
+                                        <td class="font-mono text-sm" x-text="site.listen_port || 'default'"></td>
                                         <td><span class="badge" :class="site.is_active ? 'badge-success' : 'badge-default'" x-text="site.is_active ? 'Online' : 'Offline'"></span></td>
                                         <td>
                                             <div class="flex gap-1">
@@ -1356,6 +1358,10 @@ pub fn panel_html() -> String {
                         <label class="form-label">Worker Count</label>
                         <input type="number" class="input-default" x-model.number="newWebsite.worker_count" min="1">
                     </div>
+                    <div class="form-group">
+                        <label class="form-label">Listen Port (optional)</label>
+                        <input type="number" class="input-default" x-model.number="newWebsite.listen_port" placeholder="default (80/443)">
+                    </div>
                 </div>
                 <div class="form-group flex items-center gap-2.5">
                     <input id="sslToggle" type="checkbox" class="w-4 h-4 border-slate-300 rounded text-indigo-600 focus:ring-indigo-500" x-model="newWebsite.ssl_enabled">
@@ -1485,7 +1491,8 @@ pub fn panel_html() -> String {
                 ssl_enabled: false,
                 acme_email: '',
                 acme_domains: '',
-                worker_count: 1
+                worker_count: 1,
+                listen_port: null
             };
         }
 

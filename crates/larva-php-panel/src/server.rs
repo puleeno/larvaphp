@@ -53,7 +53,7 @@ impl PanelState {
     fn list_websites_sync(&self) -> Vec<Website> {
         let conn = self.db.inner.lock().unwrap();
         let mut stmt = match conn.prepare(
-            "SELECT id, name, domain, document_root, php_version, ssl_enabled, ssl_cert_path, ssl_key_path, acme_email, acme_domains, worker_count, is_active, created_at, updated_at FROM websites ORDER BY created_at ASC"
+            "SELECT id, name, domain, document_root, php_version, ssl_enabled, ssl_cert_path, ssl_key_path, acme_email, acme_domains, worker_count, listen_port, is_active, created_at, updated_at FROM websites ORDER BY created_at ASC"
         ) {
             Ok(s) => s,
             Err(_) => return Vec::new(),
@@ -71,7 +71,8 @@ impl PanelState {
                 acme_email: r.get(8)?,
                 acme_domains: r.get(9)?,
                 worker_count: r.get::<_, i64>(10)? as u32,
-                is_active: r.get::<_, i64>(11)? != 0,
+                listen_port: r.get::<_, Option<i64>>(11)?.map(|v| v as u16),
+                is_active: r.get::<_, i64>(12)? != 0,
                 created_at: r.get(12)?,
                 updated_at: r.get(13)?,
             })
@@ -171,7 +172,7 @@ async fn list_websites(
     let result: Result<_, rusqlite::Error> = (move || {
         let conn = state.db.inner.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, name, domain, document_root, php_version, ssl_enabled, ssl_cert_path, ssl_key_path, acme_email, acme_domains, worker_count, is_active, created_at, updated_at FROM websites ORDER BY created_at DESC"
+            "SELECT id, name, domain, document_root, php_version, ssl_enabled, ssl_cert_path, ssl_key_path, acme_email, acme_domains, worker_count, listen_port, is_active, created_at, updated_at FROM websites ORDER BY created_at DESC"
         )?;
         let rows = stmt.query_map([], |r| {
             Ok(Website {
@@ -186,7 +187,8 @@ async fn list_websites(
                 acme_email: r.get(8)?,
                 acme_domains: r.get(9)?,
                 worker_count: r.get::<_, i64>(10)? as u32,
-                is_active: r.get::<_, i64>(11)? != 0,
+                listen_port: r.get::<_, Option<i64>>(11)?.map(|v| v as u16),
+                is_active: r.get::<_, i64>(12)? != 0,
                 created_at: r.get(12)?,
                 updated_at: r.get(13)?,
             })
@@ -213,22 +215,23 @@ async fn create_website(
     let result: Result<_, rusqlite::Error> = (move || {
         let conn = db.inner.lock().unwrap();
         conn.execute(
-            "INSERT INTO websites (id, name, domain, document_root, php_version, ssl_enabled, acme_email, acme_domains, worker_count, is_active, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            "INSERT INTO websites (id, name, domain, document_root, php_version, ssl_enabled, acme_email, acme_domains, worker_count, listen_port, is_active, created_at, updated_at)
+              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             rusqlite::params![
-                id,
-                payload.name,
-                payload.domain,
-                payload.document_root,
-                php_version,
-                payload.ssl_enabled.unwrap_or(false) as i64,
-                payload.acme_email,
-                payload.acme_domains,
-                worker_count,
-                1,
-                now,
-                now,
-            ],
+id,
+payload.name,
+payload.domain,
+payload.document_root,
+php_version,
+payload.ssl_enabled.unwrap_or(false) as i64,
+payload.acme_email,
+payload.acme_domains,
+worker_count,
+payload.listen_port.map(|v| v as i64),
+1,
+now,
+now,
+],
         )?;
         Ok(Website {
             id,
@@ -242,6 +245,7 @@ async fn create_website(
             acme_email: payload.acme_email,
             acme_domains: payload.acme_domains,
             worker_count,
+            listen_port: payload.listen_port,
             is_active: true,
             created_at: now.clone(),
             updated_at: now,
@@ -263,7 +267,7 @@ async fn get_website(
     let result: Result<_, rusqlite::Error> = (move || {
         let conn = state.db.inner.lock().unwrap();
         conn.query_row(
-            "SELECT id, name, domain, document_root, php_version, ssl_enabled, ssl_cert_path, ssl_key_path, acme_email, acme_domains, worker_count, is_active, created_at, updated_at FROM websites WHERE id = ?1",
+            "SELECT id, name, domain, document_root, php_version, ssl_enabled, ssl_cert_path, ssl_key_path, acme_email, acme_domains, worker_count, listen_port, is_active, created_at, updated_at FROM websites WHERE id = ?1",
             rusqlite::params![id],
             |r| Ok(Website {
                 id: r.get(0)?,
@@ -277,7 +281,8 @@ async fn get_website(
                 acme_email: r.get(8)?,
                 acme_domains: r.get(9)?,
                 worker_count: r.get::<_, i64>(10)? as u32,
-                is_active: r.get::<_, i64>(11)? != 0,
+                listen_port: r.get::<_, Option<i64>>(11)?.map(|v| v as u16),
+                is_active: r.get::<_, i64>(12)? != 0,
                 created_at: r.get(12)?,
                 updated_at: r.get(13)?,
             }),
@@ -310,9 +315,10 @@ async fn update_website(
                 acme_email = COALESCE(NULLIF(?7, ''), acme_email),
                 acme_domains = COALESCE(NULLIF(?8, ''), acme_domains),
                 worker_count = COALESCE(?9, worker_count),
-                is_active = COALESCE(?10, is_active),
-                updated_at = ?11
-              WHERE id = ?12",
+                listen_port = COALESCE(?10, listen_port),
+                is_active = COALESCE(?11, is_active),
+                updated_at = ?12
+              WHERE id = ?13",
             rusqlite::params![
                 payload.name.clone().unwrap_or_default(),
                 payload.document_root.clone().unwrap_or_default(),
@@ -323,6 +329,7 @@ async fn update_website(
                 payload.acme_email.clone().unwrap_or_default(),
                 payload.acme_domains.clone().unwrap_or_default(),
                 payload.worker_count.map(|v| v as i64),
+                payload.listen_port.map(|v| v as i64),
                 payload.is_active.map(|v| v as i64),
                 now,
                 id_clone,
@@ -330,7 +337,7 @@ async fn update_website(
         )?;
 
         conn.query_row(
-            "SELECT id, name, domain, document_root, php_version, ssl_enabled, ssl_cert_path, ssl_key_path, acme_email, acme_domains, worker_count, is_active, created_at, updated_at FROM websites WHERE id = ?1",
+            "SELECT id, name, domain, document_root, php_version, ssl_enabled, ssl_cert_path, ssl_key_path, acme_email, acme_domains, worker_count, listen_port, is_active, created_at, updated_at FROM websites WHERE id = ?1",
             rusqlite::params![id],
             |r| Ok(Website {
                 id: r.get(0)?,
@@ -344,7 +351,8 @@ async fn update_website(
                 acme_email: r.get(8)?,
                 acme_domains: r.get(9)?,
                 worker_count: r.get::<_, i64>(10)? as u32,
-                is_active: r.get::<_, i64>(11)? != 0,
+                listen_port: r.get::<_, Option<i64>>(11)?.map(|v| v as u16),
+                is_active: r.get::<_, i64>(12)? != 0,
                 created_at: r.get(12)?,
                 updated_at: r.get(13)?,
             }),

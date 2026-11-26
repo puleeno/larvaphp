@@ -67,6 +67,8 @@ impl PanelDb {
             "#,
         ).map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?;
 
+        let _ = conn.execute("ALTER TABLE websites ADD COLUMN listen_port INTEGER", []);
+
         conn.execute_batch(
             // --- SSL certificates ---
             r#"
