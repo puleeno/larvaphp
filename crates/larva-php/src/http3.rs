@@ -198,25 +198,50 @@ pub mod imp {
                     Err(e) => return Err(Error::Io(e)),
                 };
 
-                let hdr =
+                // For long headers (Initial/Handshake) the DCID length is in
+                // the packet, so MAX_CONN_ID_LEN is safe. For short headers
+                // (1-RTT requests) quiche needs the *local* connection-ID
+                // length up front. We accept with the client's Initial DCID
+                // as our SCID, which is often 8 or 16 bytes; parsing those
+                // packets with MAX_CONN_ID_LEN silently failed and dropped
+                // every HTTP/3 request after the handshake. Try each legal
+                // length and keep the DCID that belongs to a known client.
+                let hdr = if buf[0] & 0x80 == 0 {
+                    let mut parsed = None;
+                    for dcid_len in 0..=quiche::MAX_CONN_ID_LEN {
+                        if let Ok(h) = quiche::Header::from_slice(&mut buf[..len], dcid_len) {
+                            if clients.contains_key(&h.dcid.to_vec()) {
+                                parsed = Some(h);
+                                break;
+                            }
+                        }
+                    }
+                    match parsed {
+                        Some(h) => h,
+                        None => continue,
+                    }
+                } else {
                     match quiche::Header::from_slice(&mut buf[..len], quiche::MAX_CONN_ID_LEN) {
                         Ok(h) => h,
                         Err(_) => continue,
-                    };
-
-                // Version negotiation for unsupported QUIC versions.
-                if !quiche::version_is_supported(hdr.version) {
-                    if let Ok(n) = quiche::negotiate_version(&hdr.scid, &hdr.dcid, &mut out) {
-                        let _ = socket.send_to(&out[..n], from);
                     }
-                    continue;
-                }
+                };
 
                 let key = hdr.dcid.to_vec();
 
-                // Find or create the connection.
+                // Find or create the connection. Version negotiation is only
+                // valid for a NEW Initial connection. Short-header (1-RTT)
+                // packets deliberately report `version: 0` in quiche's parsed
+                // header; treating those as "unsupported version" would drop
+                // every HTTP/3 request after the handshake.
                 if !clients.contains_key(&key) {
                     if hdr.ty != quiche::Type::Initial {
+                        continue;
+                    }
+                    if !quiche::version_is_supported(hdr.version) {
+                        if let Ok(n) = quiche::negotiate_version(&hdr.scid, &hdr.dcid, &mut out) {
+                            let _ = socket.send_to(&out[..n], from);
+                        }
                         continue;
                     }
                     if clients.len() >= MAX_CLIENTS {
@@ -628,8 +653,8 @@ pub use imp::*;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
     use crate::server::Server;
+    use std::sync::Arc;
 
     fn test_server() -> Arc<Server> {
         Arc::new(Server::new(".").unwrap())
@@ -693,5 +718,157 @@ mod tests {
             test_server(),
         );
         assert!(h3.run().is_err());
+    }
+
+    #[cfg(feature = "http3")]
+    #[test]
+    fn h3_request_returns_its_own_static_body() {
+        use quiche::h3;
+        use quiche::h3::NameValue;
+        use std::net::UdpSocket;
+        use std::time::{Duration, Instant};
+
+        let dir = std::env::temp_dir().join(format!("larva-h3-e2e-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("hello.txt"), b"hello-h3").unwrap();
+
+        let cert = dir.join("c.pem").to_string_lossy().to_string();
+        let key = dir.join("k.pem").to_string_lossy().to_string();
+        let (cert, key) = ensure_cert(&cert, &key).unwrap();
+
+        // Reserve a port, then let the server bind it.
+        let probe = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let server_addr = probe.local_addr().unwrap();
+        drop(probe);
+
+        let server = Arc::new(Server::new(&dir.to_string_lossy()).unwrap());
+        let h3 = Http3Server::new(server_addr.to_string(), cert, key, server);
+        let server_thread = std::thread::spawn(move || h3.run());
+
+        let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_millis(50)))
+            .unwrap();
+        let local = socket.local_addr().unwrap();
+
+        let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
+        config
+            .set_application_protos(h3::APPLICATION_PROTOCOL)
+            .unwrap();
+        config.verify_peer(false); // self-signed test certificate
+        config.set_max_idle_timeout(5_000);
+        config.set_initial_max_data(10_000_000);
+        config.set_initial_max_stream_data_bidi_local(1_000_000);
+        config.set_initial_max_stream_data_bidi_remote(1_000_000);
+        config.set_initial_max_stream_data_uni(1_000_000);
+        config.set_initial_max_streams_bidi(100);
+        config.set_initial_max_streams_uni(100);
+
+        let mut conn = quiche::connect(
+            Some("localhost"),
+            &quiche::ConnectionId::from_ref(&[0xba; 16]),
+            local,
+            server_addr,
+            &mut config,
+        )
+        .unwrap();
+        let h3_config = h3::Config::new().unwrap();
+        let mut h3_conn: Option<h3::Connection> = None;
+
+        let mut out = [0u8; 65535];
+        let mut buf = [0u8; 65535];
+        let mut request_sent = false;
+        let mut status = None;
+        let mut body = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(5);
+
+        while Instant::now() < deadline {
+            loop {
+                match conn.send(&mut out) {
+                    Ok((n, info)) => {
+                        socket.send_to(&out[..n], info.to).unwrap();
+                    }
+                    Err(quiche::Error::Done) => break,
+                    Err(e) => panic!("quiche send failed: {}", e),
+                }
+            }
+
+            match socket.recv_from(&mut buf) {
+                Ok((n, from)) => {
+                    conn.recv(
+                        &mut buf[..n],
+                        quiche::RecvInfo {
+                            to: local,
+                            from,
+                        },
+                    )
+                    .unwrap();
+                }
+                Err(e)
+                    if e.kind() == std::io::ErrorKind::WouldBlock
+                        || e.kind() == std::io::ErrorKind::TimedOut => {}
+                Err(e) => panic!("udp recv failed: {}", e),
+            }
+
+            if (conn.is_established() || conn.is_in_early_data()) && h3_conn.is_none() {
+                h3_conn = Some(h3::Connection::with_transport(&mut conn, &h3_config).unwrap());
+            }
+
+            if let Some(h3c) = h3_conn.as_mut() {
+                if !request_sent {
+                    let headers = vec![
+                        h3::Header::new(b":method", b"GET"),
+                        h3::Header::new(b":scheme", b"https"),
+                        h3::Header::new(b":authority", b"localhost"),
+                        h3::Header::new(b":path", b"/hello.txt"),
+                        h3::Header::new(b"host", b"localhost"),
+                    ];
+                    let stream = h3c.send_request(&mut conn, &headers, true).unwrap();
+                    assert_eq!(stream, 0);
+                    request_sent = true;
+                }
+
+                loop {
+                    match h3c.poll(&mut conn) {
+                        Ok((_, h3::Event::Headers { list, .. })) => {
+                            for header in list {
+                                if header.name() == b":status" {
+                                    status = Some(
+                                        String::from_utf8_lossy(header.value())
+                                            .parse::<u16>()
+                                            .unwrap(),
+                                    );
+                                }
+                            }
+                        }
+                        Ok((stream, h3::Event::Data)) => loop {
+                            let mut chunk = [0u8; 4096];
+                            match h3c.recv_body(&mut conn, stream, &mut chunk) {
+                                Ok(n) => body.extend_from_slice(&chunk[..n]),
+                                Err(h3::Error::Done) => break,
+                                Err(e) => panic!("h3 recv_body failed: {}", e),
+                            }
+                        },
+                        Ok((_, h3::Event::Finished))
+                        | Ok((_, h3::Event::Reset { .. }))
+                        | Ok((_, h3::Event::PriorityUpdate))
+                        | Ok((_, h3::Event::GoAway)) => {}
+                        Err(h3::Error::Done) => break,
+                        Err(e) => panic!("h3 poll failed: {}", e),
+                    }
+                }
+            }
+
+            if status == Some(200) && body == b"hello-h3" {
+                break;
+            }
+        }
+
+        assert_eq!(status, Some(200), "HTTP/3 request never got a response");
+        assert_eq!(body, b"hello-h3", "HTTP/3 response body was wrong");
+        // The listener loop intentionally has no shutdown signal; leave the
+        // thread detached so the test harness can finish.
+        drop(server_thread);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
