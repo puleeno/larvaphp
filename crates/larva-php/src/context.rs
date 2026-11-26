@@ -73,6 +73,26 @@ pub struct PhpContext {
     pub handler_return: Option<crate::types::PhpValue>,
 }
 
+/// Split an HTTP `Host` header into `(name, port)` without losing the name
+/// when the port is omitted. IPv6 literals are bracketed in Host headers.
+fn split_host_header(host: &str) -> (&str, &str) {
+    let host = host.rsplit('@').next().unwrap_or(host); // strip userinfo if any
+    if let Some(rest) = host.strip_prefix('[') {
+        if let Some(end) = rest.find(']') {
+            let name = &rest[..end];
+            let tail = &rest[end + 1..];
+            if let Some(port) = tail.strip_prefix(':') {
+                return (name, port);
+            }
+            return (name, "80");
+        }
+    }
+    match host.rsplit_once(':') {
+        Some((name, port)) if !port.is_empty() => (name, port),
+        _ => (host, "80"),
+    }
+}
+
 /// Builder for creating a PhpContext.
 #[allow(dead_code)]
 pub struct PhpContextBuilder {
@@ -104,18 +124,17 @@ impl PhpContext {
             .and_then(|v| v.to_str().ok())
             .unwrap_or_default()
             .to_string();
-        let server_name = request
+        // Host may be `example.com`, `example.com:8080`, or `[::1]:8080`.
+        // Never fall back to `localhost` just because the port is absent:
+        // that would mix virtual hosts / cache keys between connections.
+        let (server_name, server_port) = request
             .headers()
             .get("host")
             .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.split_once(':').map(|(h, _)| h.to_string()))
-            .unwrap_or_else(|| "localhost".to_string());
-        let server_port = request
-            .headers()
-            .get("host")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.split_once(':').map(|(_, p)| p.to_string()))
-            .unwrap_or_else(|| "80".to_string());
+            .map(split_host_header)
+            .unwrap_or(("localhost", "80"));
+        let server_name = server_name.to_string();
+        let server_port = server_port.to_string();
         let https = if request.uri().scheme().map_or(false, |s| s == "https") {
             "on".to_string()
         } else {
@@ -393,6 +412,27 @@ mod tests {
     }
 
     #[test]
+    fn host_without_port_keeps_the_real_hostname() {
+        let server = test_server();
+        let req = hyper::Request::builder()
+            .header("host", "nghesachxua.vn")
+            .uri("/index.php")
+            .body(())
+            .unwrap();
+        let ctx = PhpContext::from_request(&req, server, vec![]).unwrap();
+        assert_eq!(ctx.server_name, "nghesachxua.vn");
+        assert_eq!(ctx.server_port, "80");
+    }
+
+    #[test]
+    fn host_with_ipv6_and_port_is_split_correctly() {
+        assert_eq!(split_host_header("[::1]:8443"), ("::1", "8443"));
+        assert_eq!(split_host_header("[::1]"), ("::1", "80"));
+        assert_eq!(split_host_header("example.com:8080"), ("example.com", "8080"));
+        assert_eq!(split_host_header("example.com"), ("example.com", "80"));
+    }
+
+    #[test]
     fn from_request_defaults_https_off() {
         let server = test_server();
         let req = hyper::Request::builder()
@@ -438,5 +478,80 @@ mod tests {
         ctx.close_context();
         ctx.close_context();
         assert!(ctx.is_done());
+    }
+
+    #[test]
+    fn concurrent_contexts_keep_isolated_request_state() {
+        const N: usize = 16;
+        let server = test_server();
+
+        std::thread::scope(|scope| {
+            for id in 0..N {
+                let server = server.clone();
+                scope.spawn(move || {
+                    let method = if id % 2 == 0 { "GET" } else { "POST" };
+                    let req = hyper::Request::builder()
+                        .method(method)
+                        .uri(format!("/index.php?req={}", id))
+                        .header("host", format!("tenant-{}.example", id))
+                        .header("x-request-id", format!("req-{}", id))
+                        .header("cookie", format!("sid={}", id))
+                        .body(())
+                        .unwrap();
+                    let ctx = PhpContext::from_request(&req, server, vec![]).unwrap();
+
+                    assert_eq!(ctx.request_method, method);
+                    assert_eq!(ctx.request_uri, format!("/index.php?req={}", id));
+                    assert_eq!(ctx.query_string, format!("req={}", id));
+                    assert_eq!(ctx.server_name, format!("tenant-{}.example", id));
+                    assert_eq!(
+                        ctx.env.get(&b"x-request-id".to_vec()).unwrap(),
+                        format!("req-{}", id).as_bytes()
+                    );
+                    assert_eq!(
+                        ctx.env.get(&b"cookie".to_vec()).unwrap(),
+                        format!("sid={}", id).as_bytes()
+                    );
+
+                    // No value from a neighbouring request may leak in.
+                    let neighbour = format!("req-{}", (id + 1) % N);
+                    assert!(
+                        !ctx.env.values().any(|value| value == neighbour.as_bytes()),
+                        "context {} leaked state from {}",
+                        id,
+                        (id + 1) % N
+                    );
+                });
+            }
+        });
+    }
+
+    #[test]
+    fn contexts_do_not_share_env_or_done_state() {
+        let server = test_server();
+
+        let first_req = hyper::Request::builder()
+            .uri("/index.php?who=first")
+            .header("x-request-id", "first")
+            .body(())
+            .unwrap();
+        let second_req = hyper::Request::builder()
+            .uri("/index.php?who=second")
+            .header("x-request-id", "second")
+            .body(())
+            .unwrap();
+
+        let mut first = PhpContext::from_request(&first_req, server.clone(), vec![]).unwrap();
+        let second = PhpContext::from_request(&second_req, server, vec![]).unwrap();
+
+        assert_eq!(first.env.get(&b"x-request-id".to_vec()).unwrap(), b"first");
+        assert_eq!(second.env.get(&b"x-request-id".to_vec()).unwrap(), b"second");
+
+        first.env.insert(b"only-first\0".to_vec(), b"yes".to_vec());
+        assert!(!second.env.contains_key(&b"only-first\0".to_vec()));
+
+        first.close_context();
+        assert!(first.is_done());
+        assert!(!second.is_done(), "closing one request must not close another");
     }
 }

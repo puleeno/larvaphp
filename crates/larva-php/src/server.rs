@@ -2280,11 +2280,26 @@ fn cached_gzip(path: &str, mtime: u64, size: u64) -> Result<Bytes> {
     Ok(body)
 }
 
+/// FNV-1a 64-bit hash. Used to distinguish in-memory cache payloads that have
+/// the same source path and length but different bytes; without this, a Jankx
+/// cache file rewritten with the same length would keep serving stale HTML to
+/// every connection.
+fn payload_hash(data: &[u8]) -> u64 {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in data {
+        hash ^= *byte as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
 /// Gzip an in-memory response (used by the edge cache) with the same bounded
-/// cache as static files.
+/// cache as static files. The cache key includes a content hash so two
+/// concurrent connections can never receive each other's payload.
 fn cached_gzip_bytes(key: &str, data: &[u8]) -> Result<Bytes> {
     let cache = gzip_cache();
-    if let Some(entry) = cache.get(key) {
+    let cache_key = format!("{}#{:016x}", key, payload_hash(data));
+    if let Some(entry) = cache.get(&cache_key) {
         if entry.size == data.len() as u64 {
             return Ok(entry.body.clone());
         }
@@ -2295,7 +2310,7 @@ fn cached_gzip_bytes(key: &str, data: &[u8]) -> Result<Bytes> {
         cache.clear();
     }
     cache.insert(
-        key.to_string(),
+        cache_key,
         CachedGzip {
             mtime: 0,
             size: data.len() as u64,
@@ -2786,6 +2801,29 @@ fn is_sensitive_file(path: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Read;
+    use std::sync::atomic::AtomicUsize;
+
+    static TEST_DIR_SEQ: AtomicUsize = AtomicUsize::new(0);
+
+    fn unique_temp_dir(prefix: &str) -> PathBuf {
+        let seq = TEST_DIR_SEQ.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "larva-{}-{}-{}",
+            prefix,
+            std::process::id(),
+            seq
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn gunzip(bytes: &Bytes) -> Vec<u8> {
+        let mut decoder = flate2::read::GzDecoder::new(&bytes[..]);
+        let mut out = Vec::new();
+        decoder.read_to_end(&mut out).unwrap();
+        out
+    }
 
     #[test]
     fn combine_cookie_header_values_joins_repeated_fields() {
@@ -3434,5 +3472,117 @@ mod tests {
         assert_eq!(&body_for_head("GET", Bytes::from_static(b"abc"))[..], b"abc");
         assert!(body_vec_for_head("head", b"abc".to_vec()).is_empty());
         assert_eq!(body_vec_for_head("POST", b"abc".to_vec()), b"abc");
+    }
+
+    // === Connection / state isolation ===
+
+    #[test]
+    fn rate_limiter_state_is_scoped_to_each_ip() {
+        let limiter = RateLimiter::new(RateLimitConfig {
+            max_requests: 2,
+            window_secs: 60,
+        });
+
+        assert!(limiter.check("10.0.0.1"));
+        assert!(limiter.check("10.0.0.1"));
+        assert!(!limiter.check("10.0.0.1"), "third request must be limited");
+
+        // A different client must not inherit the first client's counter.
+        assert!(limiter.check("10.0.0.2"));
+        assert!(limiter.check("10.0.0.2"));
+        assert!(!limiter.check("10.0.0.2"));
+    }
+
+    #[test]
+    fn cached_gzip_bytes_isolates_equal_length_payloads() {
+        const N: usize = 12;
+        let payloads: Vec<(String, Vec<u8>)> = (0..N)
+            .map(|i| {
+                (
+                    format!("edge/page-{}", i),
+                    vec![b'a' + i as u8; 256],
+                )
+            })
+            .collect();
+
+        std::thread::scope(|scope| {
+            for (key, data) in &payloads {
+                let key = key.clone();
+                let data = data.clone();
+                scope.spawn(move || {
+                    let compressed = cached_gzip_bytes(&key, &data).unwrap();
+                    assert_eq!(gunzip(&compressed), data, "gzip cache mixed payloads");
+                });
+            }
+        });
+    }
+
+    #[test]
+    fn cached_gzip_bytes_invalidates_same_length_content_change() {
+        let first = vec![b'x'; 128];
+        let second = vec![b'y'; 128];
+
+        let gz_first = cached_gzip_bytes("edge/rewritten", &first).unwrap();
+        assert_eq!(gunzip(&gz_first), first);
+
+        // Same path, same length, different bytes: must not serve stale HTML.
+        let gz_second = cached_gzip_bytes("edge/rewritten", &second).unwrap();
+        assert_eq!(gunzip(&gz_second), second);
+        assert_ne!(gz_first, gz_second);
+    }
+
+    #[test]
+    fn concurrent_handle_request_parts_keep_each_response_isolated() {
+        const N: usize = 16;
+        let dir = unique_temp_dir("h3-concurrent");
+        for i in 0..N {
+            std::fs::write(dir.join(format!("page-{}.txt", i)), format!("payload-{}", i)).unwrap();
+        }
+
+        let server = Arc::new(Server::new(&dir.to_string_lossy()).unwrap());
+        std::thread::scope(|scope| {
+            for i in 0..N {
+                let server = server.clone();
+                scope.spawn(move || {
+                    let uri = format!("/page-{}.txt", i);
+                    let (status, _, body) =
+                        server.handle_request_parts("GET", &uri, &[], &[]).unwrap();
+                    assert_eq!(status, StatusCode::OK);
+                    assert_eq!(body, format!("payload-{}", i).as_bytes());
+                });
+            }
+        });
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn concurrent_handle_request_parts_isolate_request_headers() {
+        const N: usize = 12;
+        let dir = unique_temp_dir("h3-headers");
+        for i in 0..N {
+            std::fs::write(dir.join(format!("asset-{}.txt", i)), format!("asset-{}", i)).unwrap();
+        }
+
+        let server = Arc::new(Server::new(&dir.to_string_lossy()).unwrap());
+        std::thread::scope(|scope| {
+            for i in 0..N {
+                let server = server.clone();
+                scope.spawn(move || {
+                    let uri = format!("/asset-{}.txt", i);
+                    let headers = vec![
+                        ("x-request-id".to_string(), format!("req-{}", i)),
+                        ("host".to_string(), format!("tenant-{}.example", i)),
+                    ];
+                    let (status, _, body) = server
+                        .handle_request_parts("GET", &uri, &headers, &[])
+                        .unwrap();
+                    assert_eq!(status, StatusCode::OK);
+                    assert_eq!(body, format!("asset-{}", i).as_bytes());
+                });
+            }
+        });
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
