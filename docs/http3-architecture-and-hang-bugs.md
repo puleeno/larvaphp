@@ -574,6 +574,21 @@ Chrome profile sạch, load 2:
 
 Netlog: `/tmp/opencode/quic-default-netlog.json`.
 
+Khi xoá HTTP cache nhưng giữ profile (để Alt-Svc còn hiệu lực), mọi request
+mạng cùng origin đều đi h3:
+
+```text
+nghesachxua.vn /
+nghesachxua.vn /wp-content/uploads/.../placeholder-image-1.png
+nghesachxua.vn /wp-content/themes/jankx/.../scroll.js
+nghesachxua.vn /wp-content/themes/jankx/.../frontend.js
+HTTP_TRANSACTION_HTTP2_SEND_REQUEST_HEADERS cho origin này: 0
+```
+
+Netlog: `/tmp/opencode/quic-default-netlog2.json`. CSS không có request mạng
+riêng vì critical path dùng CSS inline; DevTools không gán protocol cho inline
+style.
+
 ### Rollback
 
 Bỏ flag `--http3`, `daemon-reload`, `restart`. Do `Alt-Svc` được browser cache
