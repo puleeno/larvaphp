@@ -9,7 +9,7 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::{Arc, OnceLock, RwLock};
 use std::task::{Context, Poll};
-use std::time::{SystemTime, UNIX_EPOCH, Instant};
+use std::time::{Duration, SystemTime, UNIX_EPOCH, Instant};
 use std::io::Write;
 use bytes::Bytes;
 use flate2::{write::GzEncoder, Compression};
@@ -942,20 +942,12 @@ impl Server {
             let (stream, _) = accepted.map_err(|e| Error::Io(e))?;
             let peer_addr = stream.peer_addr().map_err(|e| Error::Io(e))?;
 
-            #[cfg(feature = "tls")]
-            let stream = if let Some(acceptor) = &tls_acceptor {
-                match acceptor.accept(stream).await {
-                    Ok(stream) => ConnectionStream::Tls(stream),
-                    Err(e) => {
-                        tracing::debug!("TLS handshake failed from {}: {}", peer_addr, e);
-                        continue;
-                    }
-                }
-            } else {
-                ConnectionStream::Plain(stream)
-            };
-            #[cfg(not(feature = "tls"))]
-            let stream = ConnectionStream::Plain(stream);
+            // Do not await the TLS handshake in the accept loop. A client that
+            // completes TCP but stalls (or never sends a ClientHello) would
+            // otherwise block every future connection, filling the listen
+            // backlog until the site becomes unreachable even though the
+            // process is still alive with normal CPU/RAM usage.
+            let tls_acceptor = tls_acceptor.clone();
 
             let root = server_root.clone();
             let split_path = server_split_path.clone();
@@ -967,6 +959,30 @@ impl Server {
             let edge_cache = server_edge_cache.clone();
 
             tokio::spawn(async move {
+                #[cfg(feature = "tls")]
+                let stream = if let Some(acceptor) = &tls_acceptor {
+                    match tokio::time::timeout(
+                        Duration::from_secs(10),
+                        acceptor.accept(stream),
+                    )
+                    .await
+                    {
+                        Ok(Ok(stream)) => ConnectionStream::Tls(stream),
+                        Ok(Err(e)) => {
+                            tracing::debug!("TLS handshake failed from {}: {}", peer_addr, e);
+                            return;
+                        }
+                        Err(_) => {
+                            tracing::debug!("TLS handshake timed out from {}", peer_addr);
+                            return;
+                        }
+                    }
+                } else {
+                    ConnectionStream::Plain(stream)
+                };
+                #[cfg(not(feature = "tls"))]
+                let stream = ConnectionStream::Plain(stream);
+
                 let io = TokioIo::new(stream);
                 if let Err(err) = auto::Builder::new(hyper_util::rt::TokioExecutor::new())
                     .serve_connection(
