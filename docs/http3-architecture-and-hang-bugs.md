@@ -282,6 +282,7 @@ Các mục dưới đây được ghi lại để tránh tưởng rằng bản s
 | BUG-08 | `on_timeout()`/`send_pending()` duyệt toàn bộ client | Chưa tối ưu; có `MAX_CLIENTS` làm trần |
 | BUG-09 | Worker panic → job mất, stream treo | Chưa có `catch_unwind`/timeout |
 | BUG-11 | Cert ACME không reload trong H3 | Chưa sửa; cần restart sau renewal hoặc rebuild `quiche::Config` |
+| BUG-13 | 1-RTT H3 request bị drop do version check / sai độ dài DCID | **Đã sửa + có test E2E** (xem mục 11) |
 
 Vì các rủi ro trên, production hiện tại **chủ động không quảng cáo H3**. H3 vẫn có thể bật rõ bằng `--http3` để test có kiểm soát.
 
@@ -443,3 +444,73 @@ Kết quả mong đợi: cả hai vẫn `2 200` trong khi connection stall còn 
 ### Invariant bổ sung
 
 11. Không `await` bất kỳ thao tác handshake/I/O nào của một connection trong vòng lặp `accept()`; mọi connection chậm phải tách sang task riêng có timeout.
+
+---
+
+## 11. BUG-13: H3 handshake xong nhưng request 1-RTT bị drop
+
+### Triệu chứng
+
+- Chrome ép QUIC (`--origin-to-force-quic-on=nghesachxua.vn:443`) cho thấy:
+  `QUIC_SESSION_VERSION_NEGOTIATED {"version":"RFCv1"}`, cert hợp lệ,
+  `QUIC_SESSION_HANDSHAKE_DONE_FRAME_RECEIVED`, `HTTP3_HEADERS_SENT stream_id 0`.
+- Server ACK các gói nhưng **không bao giờ có `:status` / response headers**.
+- Sau ~31 gói lặp lại, Chrome báo `Network blackhole detected` (`quic_error 85`).
+- Trafic TCP vẫn `h2 200`; `curl 7.88.1` không có HTTP/3 nên mọi kết luận trước đó chỉ phản ánh h2/h1.
+
+### Nguyên nhân
+
+Có hai lỗi cùng nằm ở đầu vòng lặp UDP trong `http3.rs`:
+
+1. **Version negotiation chạy cho mọi packet.** Với short-header packet (1-RTT),
+   quiche trả `hdr.version = 0`. Đoạn kiểm tra
+   `!quiche::version_is_supported(hdr.version)` vì thế gọi `negotiate_version()`
+   và `continue` — drop chính gói chứa request H3.
+
+2. **Parse short header với độ dài CID sai.** `quiche::Header::from_slice(buf, MAX_CONN_ID_LEN)`
+   chỉ đúng nếu local connection ID dài 20 byte. Server lại gọi `quiche::accept()`
+   với SCID = DCID do client chọn trong Initial (Chrome thường 8 hoặc 16 byte).
+   Header parser vì thế trả `Err`, datagram bị bỏ qua im lặng.
+
+```text
+Initial (long header, version RFCv1)  ──► accept() OK, h3 layer OK
+1-RTT (short header, version 0)       ──► version check / CID parse drop
+                                          ► HTTP3_HEADERS_SENT nhưng không có response
+```
+
+### Cách sửa (đã deploy)
+
+- Version negotiation chỉ chạy khi **connection chưa tồn tại và packet là `Initial`**.
+- Với short header, thử các độ dài DCID `0..=quiche::MAX_CONN_ID_LEN` và chọn
+  bản parse có DCID trùng một connection đã accept. Long header giữ nguyên
+  `MAX_CONN_ID_LEN` vì độ dài nằm trong packet.
+- Thêm test end-to-end `h3_request_returns_its_own_static_body`: dựng listener
+  H3 thật bằng cert tự ký, dùng `quiche::connect()` + `h3::send_request()`,
+  rồi assert `200` và đúng body. Test này đã chứng minh request 1-RTT bị drop
+  trước khi sửa và pass sau khi sửa.
+
+Kết quả test: `237 passed` (default), `243 passed`
+(`embedded,http3,acme,mercure,tls`).
+
+### Kiểm tra bằng Chrome sau deploy
+
+```bash
+google-chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage \
+  --disable-background-networking --disable-extensions --disable-sync \
+  --enable-quic --quic-version=h3 \
+  --origin-to-force-quic-on=nghesachxua.vn:443 \
+  --log-net-log=/tmp/opencode/quic-netlog-after.json \
+  --net-log-capture-mode=Default \
+  --virtual-time-budget=5000 --dump-dom https://nghesachxua.vn/
+```
+
+Trong net log mới phải có `:status` / `HTTP3_HEADERS_RECEIVED` và không còn
+`Network blackhole detected`. Production **vẫn không gửi `Alt-Svc`**; chỉ test
+ép QUIC mới dùng H3.
+
+### Invariant bổ sung
+
+12. Không áp dụng version negotiation cho packet thuộc connection đã biết;
+    `version = 0` của short-header không phải "unsupported version".
+13. Khi parse short header, độ dài DCID phải là độ dài SCID local đã dùng lúc
+    `quiche::accept()`, không phải `MAX_CONN_ID_LEN` mặc định.
