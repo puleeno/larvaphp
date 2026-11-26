@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 200" fill="none">
+  <title>LarvaPHP - PHP Mascot Monogram (Pure Black &amp; White for Print, CNC &amp; Stamps)</title>
+  <defs>
+    <mask id="mono-php-mask">
+      <rect width="320" height="200" fill="#ffffff"/>
+      <!-- Larva twin pill eyes -->
+      <rect x="30" y="72" width="9" height="19" rx="4.5" fill="#000000"/>
+      <rect x="43" y="72" width="9" height="19" rx="4.5" fill="#000000"/>
+      <!-- Larva P bowl counter -->
+      <path d="M58 76 H70 C77 76, 82 81, 82 88 C82 95, 77 100, 70 100 H58 Z" fill="#000000"/>
+      <!-- Larva diagonal tail stripes -->
+      <polygon points="16,172 60,126 70,126 26,172" fill="#000000"/>
+      <polygon points="28,186 72,140 82,140 38,186" fill="#000000"/>
+      <!-- Elephant eye & P chin counter -->
+      <circle cx="256" cy="84" r="5" fill="#000000"/>
+      <path d="M238 122 C248 118, 258 124, 260 134 C252 138, 242 136, 238 130 Z" fill="#000000"/>
+    </mask>
+  </defs>
+
+  <g mask="url(#mono-php-mask)" fill="#000000">
+    <!-- Left P (Larva) -->
+    <path d="M48 48 C52 28, 64 20, 78 22" stroke="#000000" stroke-width="8.5" stroke-linecap="round" fill="none"/>
+    <circle cx="84" cy="22" r="9"/>
+    <path d="
+      M20 156 V74 C20 55, 34 46, 56 46 H72 C93 46, 106 62, 106 86
+      C106 110, 93 126, 72 126 H58 V156 C58 174, 46 184, 34 184
+      C24 184, 20 172, 20 156 Z"/>
+
+    <!-- Center H (Split Bridge) -->
+    <path d="
+      M116 56 C116 50, 120 46, 126 46 H134 C140 46, 144 50, 144 56
+      V102 H158 L144 126 V174 C144 180, 140 184, 134 184 H126
+      C120 184, 116 180, 116 174 Z"/>
+    <path d="
+      M170 56 C170 50, 174 46, 180 46 H188 C194 46, 198 50, 198 56
+      V174 C198 180, 194 184, 188 184 H180 C174 184, 170 180, 170 174
+      V126 H152 L166 102 H170 Z"/>
+
+    <!-- Right P (Elephant) -->
+    <path d="
+      M210 74 C212 56, 226 46, 248 46 C274 46, 288 64, 286 92
+      C285 110, 290 122, 297 120 C302 118, 304 111, 304 106
+      C304 101, 312 100, 314 106 C317 118, 312 138, 294 142
+      C276 146, 260 134, 246 130 H238 V174 C238 180, 234 184, 228 184
+      H218 C212 184, 208 180, 208 174 V92 C208 84, 209 78, 210 74 Z"/>
+  </g>
+</svg>

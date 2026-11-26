@@ -12,6 +12,7 @@ use axum::{
 use tower_http::cors::CorsLayer;
 use serde::Deserialize;
 use crate::db::PanelDb;
+use crate::installer::PackageManager;
 use crate::api::{
     Website, CreateWebsite, UpdateWebsite, SslCertificate, AcmeRequest,
     WorkerStatus, DashboardStats, User, CreateUser, LoginRequest, LoginResponse,
@@ -104,6 +105,15 @@ impl PanelState {
             .route("/api/users", get(list_users).post(create_user))
             .route("/api/files", get(list_files))
             .route("/api/settings", get(list_settings).put(update_setting))
+            .route("/api/installer/services", get(list_installer_services))
+            .route("/api/installer/install", post(install_service))
+            .route("/api/installer/uninstall", post(uninstall_service))
+            .route("/api/mysql/accounts", get(list_mysql_accounts).post(create_mysql_account))
+            .route("/api/mysql/accounts/{user}", delete(delete_mysql_account))
+            .route("/api/postgres/accounts", get(list_postgres_accounts).post(create_postgres_account))
+            .route("/api/postgres/accounts/{user}", delete(delete_postgres_account))
+            .route("/api/ftp/accounts", get(list_ftp_accounts).post(create_ftp_account))
+            .route("/api/ftp/accounts/{user}", delete(delete_ftp_account))
             .route("/api/auth/login", post(login))
             .fallback(spa_fallback)
             .with_state(self)
@@ -607,6 +617,176 @@ async fn login(
         }
         Err(_) => api_err("Invalid credentials"),
     }
+}
+
+// ============================================================================
+// Installer Handlers
+// ============================================================================
+
+#[derive(serde::Deserialize)]
+struct InstallRequest {
+    service: String,
+}
+
+async fn list_installer_services() -> Json<ApiResponse<Vec<crate::installer::Service>>> {
+    let services = crate::installer::services::catalog();
+    Json(ApiResponse { success: true, data: Some(services), error: None })
+}
+
+async fn install_service(
+    Json(req): Json<InstallRequest>,
+) -> Json<ApiResponse<String>> {
+    let pm = crate::installer::OsPackageManager::new();
+    match pm.install(&req.service) {
+        Ok(out) => Json(ApiResponse { success: true, data: Some(out), error: None }),
+        Err(e) => Json(ApiResponse { success: false, data: None, error: Some(e) }),
+    }
+}
+
+async fn uninstall_service(
+    Json(req): Json<InstallRequest>,
+) -> Json<ApiResponse<String>> {
+    let pm = crate::installer::OsPackageManager::new();
+    match pm.uninstall(&req.service) {
+        Ok(out) => Json(ApiResponse { success: true, data: Some(out), error: None }),
+        Err(e) => Json(ApiResponse { success: false, data: None, error: Some(e) }),
+    }
+}
+
+// ============================================================================
+// Account Management Handlers (MySQL / PostgreSQL / FTP)
+// ============================================================================
+
+#[derive(serde::Deserialize)]
+struct AccountReq {
+    username: String,
+    password: String,
+    #[serde(default)]
+    host: Option<String>,
+    #[serde(default)]
+    database: Option<String>,
+}
+
+fn run_cmd(program: &str, args: &[&str]) -> Result<String, String> {
+    let out = std::process::Command::new(program).args(args).output().map_err(|e| e.to_string())?;
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    if out.status.success() { Ok(stdout) } else { Err(format!("{} {}", stderr, stdout)) }
+}
+
+async fn list_mysql_accounts() -> Json<ApiResponse<Vec<String>>> {
+    // List users via mysql CLI
+    let res = run_cmd("mysql", &["-N", "-B", "-e", "SELECT User,Host FROM mysql.user;"]);
+    match res {
+        Ok(out) => {
+            let users: Vec<String> = out.lines().map(|l| l.to_string()).collect();
+            Json(ApiResponse { success: true, data: Some(users), error: None })
+        }
+        Err(e) => Json(ApiResponse { success: false, data: None, error: Some(e) }),
+    }
+}
+
+async fn create_mysql_account(Json(req): Json<AccountReq>) -> Json<ApiResponse<String>> {
+    let host = req.host.clone().unwrap_or_else(|| "localhost".into());
+    let sql = format!(
+        "CREATE USER '{}'@'{}' IDENTIFIED BY '{}';",
+        req.username, host, req.password
+    );
+    match run_cmd("mysql", &["-e", &sql]) {
+        Ok(_) => Json(ApiResponse { success: true, data: Some(format!("Created {}", req.username)), error: None }),
+        Err(e) => Json(ApiResponse { success: false, data: None, error: Some(e) }),
+    }
+}
+
+async fn delete_mysql_account(axum::extract::Path(user): axum::extract::Path<String>) -> Json<ApiResponse<String>> {
+    let sql = format!("DROP USER IF EXISTS '{}'@'localhost';", user);
+    match run_cmd("mysql", &["-e", &sql]) {
+        Ok(_) => Json(ApiResponse { success: true, data: Some(format!("Dropped {}", user)), error: None }),
+        Err(e) => Json(ApiResponse { success: false, data: None, error: Some(e) }),
+    }
+}
+
+async fn list_postgres_accounts() -> Json<ApiResponse<Vec<String>>> {
+    let res = run_cmd("psql", &["-t", "-A", "-c", "SELECT usename FROM pg_user;"]);
+    match res {
+        Ok(out) => {
+            let users: Vec<String> = out.lines().filter(|l| !l.trim().is_empty()).map(|l| l.to_string()).collect();
+            Json(ApiResponse { success: true, data: Some(users), error: None })
+        }
+        Err(e) => Json(ApiResponse { success: false, data: None, error: Some(e) }),
+    }
+}
+
+async fn create_postgres_account(Json(req): Json<AccountReq>) -> Json<ApiResponse<String>> {
+    let sql = format!("CREATE USER {} WITH PASSWORD '{}';", req.username, req.password);
+    match run_cmd("psql", &["-c", &sql]) {
+        Ok(_) => Json(ApiResponse { success: true, data: Some(format!("Created {}", req.username)), error: None }),
+        Err(e) => Json(ApiResponse { success: false, data: None, error: Some(e) }),
+    }
+}
+
+async fn delete_postgres_account(axum::extract::Path(user): axum::extract::Path<String>) -> Json<ApiResponse<String>> {
+    let sql = format!("DROP USER IF EXISTS {};", user);
+    match run_cmd("psql", &["-c", &sql]) {
+        Ok(_) => Json(ApiResponse { success: true, data: Some(format!("Dropped {}", user)), error: None }),
+        Err(e) => Json(ApiResponse { success: false, data: None, error: Some(e) }),
+    }
+}
+
+async fn list_ftp_accounts() -> Json<ApiResponse<Vec<String>>> {
+    // List local users with home in /srv/ftp or /home (best-effort)
+    let res = run_cmd("getent", &["passwd"]);
+    match res {
+        Ok(out) => {
+            let users: Vec<String> = out.lines().filter(|l| l.contains("/home/") || l.contains("/srv/")).map(|l| l.split(':').next().unwrap_or("").to_string()).collect();
+            Json(ApiResponse { success: true, data: Some(users), error: None })
+        }
+        Err(e) => Json(ApiResponse { success: false, data: None, error: Some(e) }),
+    }
+}
+
+async fn create_ftp_account(Json(req): Json<AccountReq>) -> Json<ApiResponse<String>> {
+    // Create a system user for FTP (Linux). On Windows use net user.
+    #[cfg(target_os = "linux")]
+    {
+        let home = format!("/home/{}", req.username);
+        let _ = run_cmd("sudo", &["useradd", "-m", "-d", &home, "-s", "/bin/bash", &req.username]);
+        let _ = run_cmd("sudo", &["chpasswd"]);
+        // set password via chpasswd pipe
+        let input = format!("{}:{}", req.username, req.password);
+        let mut child = std::process::Command::new("sudo")
+            .args(["chpasswd"])
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|e| e.to_string())?;
+        use std::io::Write;
+        if let Some(mut stdin) = child.stdin.take() {
+            let _ = stdin.write_all(input.as_bytes());
+        }
+        let _ = child.wait();
+        Json(ApiResponse { success: true, data: Some(format!("Created FTP user {}", req.username)), error: None })
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let _ = run_cmd("net", &["user", &req.username, &req.password, "/add"]);
+        Json(ApiResponse { success: true, data: Some(format!("Created FTP user {}", req.username)), error: None })
+    }
+    #[cfg(target_os = "macos")]
+    {
+        Json(ApiResponse { success: false, data: None, error: Some("FTP user creation on macOS not yet implemented".into()) })
+    }
+}
+
+async fn delete_ftp_account(axum::extract::Path(user): axum::extract::Path<String>) -> Json<ApiResponse<String>> {
+    #[cfg(target_os = "linux")]
+    {
+        let _ = run_cmd("sudo", &["userdel", "-r", &user]);
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let _ = run_cmd("net", &["user", &user, "/delete"]);
+    }
+    Json(ApiResponse { success: true, data: Some(format!("Deleted {}", user)), error: None })
 }
 
 // ============================================================================
