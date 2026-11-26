@@ -105,6 +105,7 @@ impl PanelState {
             .route("/api/users", get(list_users).post(create_user))
             .route("/api/files", get(list_files))
             .route("/api/settings", get(list_settings).put(update_setting))
+            .route("/api/server/reload", post(reload_server))
             .route("/api/installer/services", get(list_installer_services))
             .route("/api/installer/install", post(install_service))
             .route("/api/installer/uninstall", post(uninstall_service))
@@ -787,6 +788,11 @@ async fn delete_ftp_account(axum::extract::Path(user): axum::extract::Path<Strin
         let _ = run_cmd("net", &["user", &user, "/delete"]);
     }
     Json(ApiResponse { success: true, data: Some(format!("Deleted {}", user)), error: None })
+}
+
+async fn reload_server(State(state): State<PanelState>) -> Json<ApiResponse<String>> {
+    state.reload_vhosts();
+    Json(ApiResponse { success: true, data: Some("reloaded".into()), error: None })
 }
 
 // ============================================================================
