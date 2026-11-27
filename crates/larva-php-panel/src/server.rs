@@ -105,7 +105,8 @@ impl PanelState {
             .route("/api/users", get(list_users).post(create_user))
             .route("/api/files", get(list_files))
             .route("/api/settings", get(list_settings).put(update_setting))
-            .route("/api/server/reload", post(reload_server)).route("/api/auth/login", post(login))
+            .route("/api/server/reload", post(reload_server))            .route("/api/auth/login", post(login))
+            .route("/api/auth/me", get(me))
             .fallback(spa_fallback)
             .with_state(self)
             .layer(
@@ -590,6 +591,7 @@ async fn login(
     State(state): State<PanelState>,
     Json(payload): Json<LoginRequest>,
 ) -> Json<ApiResponse<LoginResponse>> {
+    let state2 = state.clone();
     let result: Result<_, rusqlite::Error> = (move || {
         let conn = state.db.inner.lock().unwrap();
         conn.query_row(
@@ -611,9 +613,42 @@ async fn login(
                 return api_err("Account disabled");
             }
             let token = format!("larva_{}", short_id());
+            // Persist session (RBAC)
+            let conn = state2.db.inner.lock().unwrap();
+            let expires = chrono::Utc::now() + chrono::Duration::hours(24);
+            let _ = conn.execute(
+                "INSERT INTO sessions (token, user_id, username, role, expires_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![token, user.id, user.username, user.role, expires.to_rfc3339()],
+            );
             api_json(LoginResponse { token, user })
         }
         Err(_) => api_err("Invalid credentials"),
+    }
+}
+
+async fn me(State(state): State<PanelState>, req: axum::http::Request<axum::body::Body>) -> Json<ApiResponse<User>> {
+    let token = req.headers().get(header::AUTHORIZATION)
+        .and_then(|h| h.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer "))
+        .unwrap_or("");
+    let result: Result<User, rusqlite::Error> = (move || {
+        let conn = state.db.inner.lock().unwrap();
+        conn.query_row(
+            "SELECT u.id, u.username, u.role, u.email, u.is_active FROM users u JOIN sessions s ON s.user_id = u.id WHERE s.token = ?1 AND s.expires_at > datetime('now')",
+            rusqlite::params![token],
+            |r| Ok(User {
+                id: r.get(0)?,
+                username: r.get(1)?,
+                role: r.get(2)?,
+                email: r.get(3)?,
+                is_active: r.get::<_, i64>(4)? != 0,
+                created_at: String::new(),
+            }),
+        )
+    })();
+    match result {
+        Ok(u) => api_json(u),
+        Err(_) => api_err("unauthorized"),
     }
 }
 

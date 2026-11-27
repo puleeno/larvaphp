@@ -111,6 +111,20 @@ impl PanelDb {
         ).map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?;
 
         conn.execute_batch(
+            // --- Sessions (RBAC) ---
+            r#"
+            CREATE TABLE IF NOT EXISTS sessions (
+                token      TEXT PRIMARY KEY,
+                user_id    TEXT NOT NULL,
+                username   TEXT NOT NULL,
+                role       TEXT NOT NULL DEFAULT 'user',
+                expires_at TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+            ",
+        ).map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?;
+
+        conn.execute_batch(
             // --- Audit log ---
             r#"
             CREATE TABLE IF NOT EXISTS audit_log (
