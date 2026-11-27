@@ -21,6 +21,7 @@ pub struct Website {
     pub acme_email: Option<String>,
     pub acme_domains: Option<String>,
     pub worker_count: u32,
+    pub listen_port: Option<u16>,
     pub is_active: bool,
     pub created_at: String,
     pub updated_at: String,
@@ -36,6 +37,7 @@ pub struct CreateWebsite {
     pub acme_email: Option<String>,
     pub acme_domains: Option<String>,
     pub worker_count: Option<u32>,
+    pub listen_port: Option<u16>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -49,6 +51,7 @@ pub struct UpdateWebsite {
     pub acme_email: Option<String>,
     pub acme_domains: Option<String>,
     pub worker_count: Option<u32>,
+    pub listen_port: Option<u16>,
     pub is_active: Option<bool>,
 }
 

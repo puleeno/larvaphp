@@ -6,13 +6,13 @@ use axum::{
     Router,
     routing::{get, post, delete},
     extract::{State, Query, Path},
-    response::{Html, Json},
-    http::{Method, header},
+    response::{Html, Json, IntoResponse},
+    http::{Method, header, StatusCode, Request},
+    middleware,
 };
 use tower_http::cors::CorsLayer;
 use serde::Deserialize;
 use crate::db::PanelDb;
-use crate::installer::PackageManager;
 use crate::api::{
     Website, CreateWebsite, UpdateWebsite, SslCertificate, AcmeRequest,
     WorkerStatus, DashboardStats, User, CreateUser, LoginRequest, LoginResponse,
@@ -53,7 +53,7 @@ impl PanelState {
     fn list_websites_sync(&self) -> Vec<Website> {
         let conn = self.db.inner.lock().unwrap();
         let mut stmt = match conn.prepare(
-            "SELECT id, name, domain, document_root, php_version, ssl_enabled, ssl_cert_path, ssl_key_path, acme_email, acme_domains, worker_count, is_active, created_at, updated_at FROM websites ORDER BY created_at ASC"
+            "SELECT id, name, domain, document_root, php_version, ssl_enabled, ssl_cert_path, ssl_key_path, acme_email, acme_domains, worker_count, listen_port, is_active, created_at, updated_at FROM websites ORDER BY created_at ASC"
         ) {
             Ok(s) => s,
             Err(_) => return Vec::new(),
@@ -71,7 +71,8 @@ impl PanelState {
                 acme_email: r.get(8)?,
                 acme_domains: r.get(9)?,
                 worker_count: r.get::<_, i64>(10)? as u32,
-                is_active: r.get::<_, i64>(11)? != 0,
+                listen_port: r.get::<_, Option<i64>>(11)?.map(|v| v as u16),
+                is_active: r.get::<_, i64>(12)? != 0,
                 created_at: r.get(12)?,
                 updated_at: r.get(13)?,
             })
@@ -88,6 +89,7 @@ impl PanelState {
     }
 
     pub fn router(self) -> Router {
+        let state = self.clone();
         Router::new()
             .route("/api/stats", get(stats_handler))
             .route("/api/websites", get(list_websites).post(create_website))
@@ -103,21 +105,16 @@ impl PanelState {
             .route("/api/workers/{id}/restart", post(restart_worker))
             .route("/api/workers/{id}/stop", post(stop_worker))
             .route("/api/users", get(list_users).post(create_user))
+            .route("/api/users/{id}/role", axum::routing::put(update_user_role))
+            .route("/api/roles", get(list_roles))
+            .route("/api/roles/{role}/permissions", axum::routing::put(update_role_permissions))
             .route("/api/files", get(list_files))
             .route("/api/settings", get(list_settings).put(update_setting))
-            .route("/api/server/reload", post(reload_server))
-            .route("/api/installer/services", get(list_installer_services))
-            .route("/api/installer/install", post(install_service))
-            .route("/api/installer/uninstall", post(uninstall_service))
-            .route("/api/mysql/accounts", get(list_mysql_accounts).post(create_mysql_account))
-            .route("/api/mysql/accounts/{user}", delete(delete_mysql_account))
-            .route("/api/postgres/accounts", get(list_postgres_accounts).post(create_postgres_account))
-            .route("/api/postgres/accounts/{user}", delete(delete_postgres_account))
-            .route("/api/ftp/accounts", get(list_ftp_accounts).post(create_ftp_account))
-            .route("/api/ftp/accounts/{user}", delete(delete_ftp_account))
-            .route("/api/auth/login", post(login))
+            .route("/api/server/reload", post(reload_server))            .route("/api/auth/login", post(login))
+            .route("/api/auth/me", get(me))
+            .route_layer(middleware::from_fn_with_state(state.clone(), auth_middleware))
             .fallback(spa_fallback)
-            .with_state(self)
+            .with_state(state)
             .layer(
                 CorsLayer::new()
                     .allow_origin(tower_http::cors::Any)
@@ -171,7 +168,7 @@ async fn list_websites(
     let result: Result<_, rusqlite::Error> = (move || {
         let conn = state.db.inner.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, name, domain, document_root, php_version, ssl_enabled, ssl_cert_path, ssl_key_path, acme_email, acme_domains, worker_count, is_active, created_at, updated_at FROM websites ORDER BY created_at DESC"
+            "SELECT id, name, domain, document_root, php_version, ssl_enabled, ssl_cert_path, ssl_key_path, acme_email, acme_domains, worker_count, listen_port, is_active, created_at, updated_at FROM websites ORDER BY created_at DESC"
         )?;
         let rows = stmt.query_map([], |r| {
             Ok(Website {
@@ -186,7 +183,8 @@ async fn list_websites(
                 acme_email: r.get(8)?,
                 acme_domains: r.get(9)?,
                 worker_count: r.get::<_, i64>(10)? as u32,
-                is_active: r.get::<_, i64>(11)? != 0,
+                listen_port: r.get::<_, Option<i64>>(11)?.map(|v| v as u16),
+                is_active: r.get::<_, i64>(12)? != 0,
                 created_at: r.get(12)?,
                 updated_at: r.get(13)?,
             })
@@ -213,22 +211,23 @@ async fn create_website(
     let result: Result<_, rusqlite::Error> = (move || {
         let conn = db.inner.lock().unwrap();
         conn.execute(
-            "INSERT INTO websites (id, name, domain, document_root, php_version, ssl_enabled, acme_email, acme_domains, worker_count, is_active, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            "INSERT INTO websites (id, name, domain, document_root, php_version, ssl_enabled, acme_email, acme_domains, worker_count, listen_port, is_active, created_at, updated_at)
+              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             rusqlite::params![
-                id,
-                payload.name,
-                payload.domain,
-                payload.document_root,
-                php_version,
-                payload.ssl_enabled.unwrap_or(false) as i64,
-                payload.acme_email,
-                payload.acme_domains,
-                worker_count,
-                1,
-                now,
-                now,
-            ],
+id,
+payload.name,
+payload.domain,
+payload.document_root,
+php_version,
+payload.ssl_enabled.unwrap_or(false) as i64,
+payload.acme_email,
+payload.acme_domains,
+worker_count,
+payload.listen_port.map(|v| v as i64),
+1,
+now,
+now,
+],
         )?;
         Ok(Website {
             id,
@@ -242,6 +241,7 @@ async fn create_website(
             acme_email: payload.acme_email,
             acme_domains: payload.acme_domains,
             worker_count,
+            listen_port: payload.listen_port,
             is_active: true,
             created_at: now.clone(),
             updated_at: now,
@@ -263,7 +263,7 @@ async fn get_website(
     let result: Result<_, rusqlite::Error> = (move || {
         let conn = state.db.inner.lock().unwrap();
         conn.query_row(
-            "SELECT id, name, domain, document_root, php_version, ssl_enabled, ssl_cert_path, ssl_key_path, acme_email, acme_domains, worker_count, is_active, created_at, updated_at FROM websites WHERE id = ?1",
+            "SELECT id, name, domain, document_root, php_version, ssl_enabled, ssl_cert_path, ssl_key_path, acme_email, acme_domains, worker_count, listen_port, is_active, created_at, updated_at FROM websites WHERE id = ?1",
             rusqlite::params![id],
             |r| Ok(Website {
                 id: r.get(0)?,
@@ -277,7 +277,8 @@ async fn get_website(
                 acme_email: r.get(8)?,
                 acme_domains: r.get(9)?,
                 worker_count: r.get::<_, i64>(10)? as u32,
-                is_active: r.get::<_, i64>(11)? != 0,
+                listen_port: r.get::<_, Option<i64>>(11)?.map(|v| v as u16),
+                is_active: r.get::<_, i64>(12)? != 0,
                 created_at: r.get(12)?,
                 updated_at: r.get(13)?,
             }),
@@ -310,9 +311,10 @@ async fn update_website(
                 acme_email = COALESCE(NULLIF(?7, ''), acme_email),
                 acme_domains = COALESCE(NULLIF(?8, ''), acme_domains),
                 worker_count = COALESCE(?9, worker_count),
-                is_active = COALESCE(?10, is_active),
-                updated_at = ?11
-              WHERE id = ?12",
+                listen_port = COALESCE(?10, listen_port),
+                is_active = COALESCE(?11, is_active),
+                updated_at = ?12
+              WHERE id = ?13",
             rusqlite::params![
                 payload.name.clone().unwrap_or_default(),
                 payload.document_root.clone().unwrap_or_default(),
@@ -323,6 +325,7 @@ async fn update_website(
                 payload.acme_email.clone().unwrap_or_default(),
                 payload.acme_domains.clone().unwrap_or_default(),
                 payload.worker_count.map(|v| v as i64),
+                payload.listen_port.map(|v| v as i64),
                 payload.is_active.map(|v| v as i64),
                 now,
                 id_clone,
@@ -330,7 +333,7 @@ async fn update_website(
         )?;
 
         conn.query_row(
-            "SELECT id, name, domain, document_root, php_version, ssl_enabled, ssl_cert_path, ssl_key_path, acme_email, acme_domains, worker_count, is_active, created_at, updated_at FROM websites WHERE id = ?1",
+            "SELECT id, name, domain, document_root, php_version, ssl_enabled, ssl_cert_path, ssl_key_path, acme_email, acme_domains, worker_count, listen_port, is_active, created_at, updated_at FROM websites WHERE id = ?1",
             rusqlite::params![id],
             |r| Ok(Website {
                 id: r.get(0)?,
@@ -344,7 +347,8 @@ async fn update_website(
                 acme_email: r.get(8)?,
                 acme_domains: r.get(9)?,
                 worker_count: r.get::<_, i64>(10)? as u32,
-                is_active: r.get::<_, i64>(11)? != 0,
+                listen_port: r.get::<_, Option<i64>>(11)?.map(|v| v as u16),
+                is_active: r.get::<_, i64>(12)? != 0,
                 created_at: r.get(12)?,
                 updated_at: r.get(13)?,
             }),
@@ -555,6 +559,66 @@ async fn create_user(
     }
 }
 
+async fn update_user_role(
+    State(state): State<PanelState>,
+    Path(id): Path<String>,
+    Json(payload): Json<serde_json::Value>,
+) -> Json<ApiResponse<String>> {
+    let role = payload.get("role").and_then(|v| v.as_str()).unwrap_or("viewer").to_string();
+    let result: Result<(), rusqlite::Error> = (move || {
+        let conn = state.db.inner.lock().unwrap();
+        conn.execute("UPDATE users SET role = ?1 WHERE id = ?2", rusqlite::params![role, id])?;
+        Ok(())
+    })();
+    match result {
+        Ok(_) => api_json("ok".to_string()),
+        Err(e) => api_err(&format!("update role: {}", e)),
+    }
+}
+
+async fn list_roles(State(state): State<PanelState>) -> Json<ApiResponse<serde_json::Value>> {
+    let result: Result<_, rusqlite::Error> = (move || {
+        let conn = state.db.inner.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT DISTINCT role FROM role_permissions UNION SELECT DISTINCT role FROM users")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        let mut roles = Vec::new();
+        for row in rows { roles.push(row?); }
+        let mut out = serde_json::Map::new();
+        for role in &roles {
+            let mut pStmt = conn.prepare("SELECT permission FROM role_permissions WHERE role = ?1")?;
+            let perms: Vec<String> = pStmt.query_map([role], |r| r.get(0))?.filter_map(|r| r.ok()).collect();
+            out.insert(role.clone(), serde_json::json!(perms));
+        }
+        Ok(serde_json::Value::Object(out))
+    })();
+    match result {
+        Ok(v) => api_json(v),
+        Err(e) => api_err(&format!("list roles: {}", e)),
+    }
+}
+
+async fn update_role_permissions(
+    State(state): State<PanelState>,
+    Path(role): Path<String>,
+    Json(payload): Json<serde_json::Value>,
+) -> Json<ApiResponse<String>> {
+    let perms = payload.get("permissions").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    let result: Result<(), rusqlite::Error> = (move || {
+        let conn = state.db.inner.lock().unwrap();
+        conn.execute("DELETE FROM role_permissions WHERE role = ?1", rusqlite::params![role])?;
+        for p in perms {
+            if let Some(s) = p.as_str() {
+                conn.execute("INSERT OR IGNORE INTO role_permissions (role, permission) VALUES (?1, ?2)", rusqlite::params![role, s])?;
+            }
+        }
+        Ok(())
+    })();
+    match result {
+        Ok(_) => api_json("ok".to_string()),
+        Err(e) => api_err(&format!("update role perms: {}", e)),
+    }
+}
+
 async fn list_files(
     Query(query): Query<FileQuery>,
 ) -> Json<ApiResponse<Vec<serde_json::Value>>> {
@@ -593,6 +657,7 @@ async fn login(
     State(state): State<PanelState>,
     Json(payload): Json<LoginRequest>,
 ) -> Json<ApiResponse<LoginResponse>> {
+    let state2 = state.clone();
     let result: Result<_, rusqlite::Error> = (move || {
         let conn = state.db.inner.lock().unwrap();
         conn.query_row(
@@ -614,180 +679,43 @@ async fn login(
                 return api_err("Account disabled");
             }
             let token = format!("larva_{}", short_id());
+            // Persist session (RBAC)
+            let conn = state2.db.inner.lock().unwrap();
+            let expires = chrono::Utc::now() + chrono::Duration::minutes(15);
+            let _ = conn.execute(
+                "INSERT INTO sessions (token, user_id, username, role, expires_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![token, user.id, user.username, user.role, expires.to_rfc3339()],
+            );
             api_json(LoginResponse { token, user })
         }
         Err(_) => api_err("Invalid credentials"),
     }
 }
 
-// ============================================================================
-// Installer Handlers
-// ============================================================================
-
-#[derive(serde::Deserialize)]
-struct InstallRequest {
-    service: String,
-}
-
-async fn list_installer_services() -> Json<ApiResponse<Vec<crate::installer::Service>>> {
-    let services = crate::installer::services::catalog();
-    Json(ApiResponse { success: true, data: Some(services), error: None })
-}
-
-async fn install_service(
-    Json(req): Json<InstallRequest>,
-) -> Json<ApiResponse<String>> {
-    let pm = crate::installer::OsPackageManager::new();
-    match pm.install(&req.service) {
-        Ok(out) => Json(ApiResponse { success: true, data: Some(out), error: None }),
-        Err(e) => Json(ApiResponse { success: false, data: None, error: Some(e) }),
+async fn me(State(state): State<PanelState>, req: axum::http::Request<axum::body::Body>) -> Json<ApiResponse<User>> {
+    let token = req.headers().get(header::AUTHORIZATION)
+        .and_then(|h| h.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer "))
+        .unwrap_or("");
+    let result: Result<User, rusqlite::Error> = (move || {
+        let conn = state.db.inner.lock().unwrap();
+        conn.query_row(
+            "SELECT u.id, u.username, u.role, u.email, u.is_active FROM users u JOIN sessions s ON s.user_id = u.id WHERE s.token = ?1 AND s.expires_at > datetime('now')",
+            rusqlite::params![token],
+            |r| Ok(User {
+                id: r.get(0)?,
+                username: r.get(1)?,
+                role: r.get(2)?,
+                email: r.get(3)?,
+                is_active: r.get::<_, i64>(4)? != 0,
+                created_at: String::new(),
+            }),
+        )
+    })();
+    match result {
+        Ok(u) => api_json(u),
+        Err(_) => api_err("unauthorized"),
     }
-}
-
-async fn uninstall_service(
-    Json(req): Json<InstallRequest>,
-) -> Json<ApiResponse<String>> {
-    let pm = crate::installer::OsPackageManager::new();
-    match pm.uninstall(&req.service) {
-        Ok(out) => Json(ApiResponse { success: true, data: Some(out), error: None }),
-        Err(e) => Json(ApiResponse { success: false, data: None, error: Some(e) }),
-    }
-}
-
-// ============================================================================
-// Account Management Handlers (MySQL / PostgreSQL / FTP)
-// ============================================================================
-
-#[derive(serde::Deserialize)]
-struct AccountReq {
-    username: String,
-    password: String,
-    #[serde(default)]
-    host: Option<String>,
-    #[serde(default)]
-    database: Option<String>,
-}
-
-fn run_cmd(program: &str, args: &[&str]) -> Result<String, String> {
-    let out = std::process::Command::new(program).args(args).output().map_err(|e| e.to_string())?;
-    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-    if out.status.success() { Ok(stdout) } else { Err(format!("{} {}", stderr, stdout)) }
-}
-
-async fn list_mysql_accounts() -> Json<ApiResponse<Vec<String>>> {
-    // List users via mysql CLI
-    let res = run_cmd("mysql", &["-N", "-B", "-e", "SELECT User,Host FROM mysql.user;"]);
-    match res {
-        Ok(out) => {
-            let users: Vec<String> = out.lines().map(|l| l.to_string()).collect();
-            Json(ApiResponse { success: true, data: Some(users), error: None })
-        }
-        Err(e) => Json(ApiResponse { success: false, data: None, error: Some(e) }),
-    }
-}
-
-async fn create_mysql_account(Json(req): Json<AccountReq>) -> Json<ApiResponse<String>> {
-    let host = req.host.clone().unwrap_or_else(|| "localhost".into());
-    let sql = format!(
-        "CREATE USER '{}'@'{}' IDENTIFIED BY '{}';",
-        req.username, host, req.password
-    );
-    match run_cmd("mysql", &["-e", &sql]) {
-        Ok(_) => Json(ApiResponse { success: true, data: Some(format!("Created {}", req.username)), error: None }),
-        Err(e) => Json(ApiResponse { success: false, data: None, error: Some(e) }),
-    }
-}
-
-async fn delete_mysql_account(axum::extract::Path(user): axum::extract::Path<String>) -> Json<ApiResponse<String>> {
-    let sql = format!("DROP USER IF EXISTS '{}'@'localhost';", user);
-    match run_cmd("mysql", &["-e", &sql]) {
-        Ok(_) => Json(ApiResponse { success: true, data: Some(format!("Dropped {}", user)), error: None }),
-        Err(e) => Json(ApiResponse { success: false, data: None, error: Some(e) }),
-    }
-}
-
-async fn list_postgres_accounts() -> Json<ApiResponse<Vec<String>>> {
-    let res = run_cmd("psql", &["-t", "-A", "-c", "SELECT usename FROM pg_user;"]);
-    match res {
-        Ok(out) => {
-            let users: Vec<String> = out.lines().filter(|l| !l.trim().is_empty()).map(|l| l.to_string()).collect();
-            Json(ApiResponse { success: true, data: Some(users), error: None })
-        }
-        Err(e) => Json(ApiResponse { success: false, data: None, error: Some(e) }),
-    }
-}
-
-async fn create_postgres_account(Json(req): Json<AccountReq>) -> Json<ApiResponse<String>> {
-    let sql = format!("CREATE USER {} WITH PASSWORD '{}';", req.username, req.password);
-    match run_cmd("psql", &["-c", &sql]) {
-        Ok(_) => Json(ApiResponse { success: true, data: Some(format!("Created {}", req.username)), error: None }),
-        Err(e) => Json(ApiResponse { success: false, data: None, error: Some(e) }),
-    }
-}
-
-async fn delete_postgres_account(axum::extract::Path(user): axum::extract::Path<String>) -> Json<ApiResponse<String>> {
-    let sql = format!("DROP USER IF EXISTS {};", user);
-    match run_cmd("psql", &["-c", &sql]) {
-        Ok(_) => Json(ApiResponse { success: true, data: Some(format!("Dropped {}", user)), error: None }),
-        Err(e) => Json(ApiResponse { success: false, data: None, error: Some(e) }),
-    }
-}
-
-async fn list_ftp_accounts() -> Json<ApiResponse<Vec<String>>> {
-    // List local users with home in /srv/ftp or /home (best-effort)
-    let res = run_cmd("getent", &["passwd"]);
-    match res {
-        Ok(out) => {
-            let users: Vec<String> = out.lines().filter(|l| l.contains("/home/") || l.contains("/srv/")).map(|l| l.split(':').next().unwrap_or("").to_string()).collect();
-            Json(ApiResponse { success: true, data: Some(users), error: None })
-        }
-        Err(e) => Json(ApiResponse { success: false, data: None, error: Some(e) }),
-    }
-}
-
-async fn create_ftp_account(Json(req): Json<AccountReq>) -> Json<ApiResponse<String>> {
-    // Create a system user for FTP (Linux). On Windows use net user.
-    #[cfg(target_os = "linux")]
-    {
-        let home = format!("/home/{}", req.username);
-        let _ = run_cmd("sudo", &["useradd", "-m", "-d", &home, "-s", "/bin/bash", &req.username]);
-        let _ = run_cmd("sudo", &["chpasswd"]);
-        // set password via chpasswd pipe
-        let input = format!("{}:{}", req.username, req.password);
-        let mut child = std::process::Command::new("sudo")
-            .args(["chpasswd"])
-            .stdin(std::process::Stdio::piped())
-            .spawn()
-            .map_err(|e| e.to_string())?;
-        use std::io::Write;
-        if let Some(mut stdin) = child.stdin.take() {
-            let _ = stdin.write_all(input.as_bytes());
-        }
-        let _ = child.wait();
-        Json(ApiResponse { success: true, data: Some(format!("Created FTP user {}", req.username)), error: None })
-    }
-    #[cfg(target_os = "windows")]
-    {
-        let _ = run_cmd("net", &["user", &req.username, &req.password, "/add"]);
-        Json(ApiResponse { success: true, data: Some(format!("Created FTP user {}", req.username)), error: None })
-    }
-    #[cfg(target_os = "macos")]
-    {
-        Json(ApiResponse { success: false, data: None, error: Some("FTP user creation on macOS not yet implemented".into()) })
-    }
-}
-
-async fn delete_ftp_account(axum::extract::Path(user): axum::extract::Path<String>) -> Json<ApiResponse<String>> {
-    #[cfg(target_os = "linux")]
-    {
-        let _ = run_cmd("sudo", &["userdel", "-r", &user]);
-    }
-    #[cfg(target_os = "windows")]
-    {
-        let _ = run_cmd("net", &["user", &user, "/delete"]);
-    }
-    Json(ApiResponse { success: true, data: Some(format!("Deleted {}", user)), error: None })
 }
 
 async fn reload_server(State(state): State<PanelState>) -> Json<ApiResponse<String>> {
@@ -798,6 +726,46 @@ async fn reload_server(State(state): State<PanelState>) -> Json<ApiResponse<Stri
 // ============================================================================
 // SPA Fallback
 // ============================================================================
+
+
+async fn auth_middleware(
+    State(state): State<PanelState>,
+    req: Request<axum::body::Body>,
+    next: middleware::Next,
+) -> axum::response::Response {
+    let state2 = state.clone();
+    if req.method() == Method::OPTIONS {
+        return next.run(req).await;
+    }
+    if req.uri().path() == "/api/auth/login" {
+        return next.run(req).await;
+    }
+    let token = req
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|h| h.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer "))
+        .unwrap_or("");
+    let valid = (move || {
+        let conn = state.db.inner.lock().unwrap();
+        conn.query_row(
+            "SELECT 1 FROM sessions WHERE token = ?1 AND expires_at > datetime('now')",
+            rusqlite::params![token],
+            |_| Ok(()),
+        )
+        .is_ok()
+    })();
+    if !valid {
+        return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
+    }
+    // Sliding session: refresh expiry on activity (15 min inactivity timeout)
+    let _ = (move || {
+        let conn = state2.db.inner.lock().unwrap();
+        conn.execute("UPDATE sessions SET expires_at = ?1 WHERE token = ?2", rusqlite::params![(chrono::Utc::now() + chrono::Duration::minutes(15)).to_rfc3339(), token])?;
+        Ok::<_, rusqlite::Error>(())
+    })();
+    next.run(req).await
+}
 
 async fn spa_fallback() -> Html<String> {
     Html(crate::html::panel_html())

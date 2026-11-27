@@ -67,6 +67,8 @@ impl PanelDb {
             "#,
         ).map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?;
 
+        let _ = conn.execute("ALTER TABLE websites ADD COLUMN listen_port INTEGER", []);
+
         conn.execute_batch(
             // --- SSL certificates ---
             r#"
@@ -109,6 +111,41 @@ impl PanelDb {
         ).map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?;
 
         conn.execute_batch(
+            // --- Sessions (RBAC) ---
+            r#"
+            CREATE TABLE IF NOT EXISTS sessions (
+                token      TEXT PRIMARY KEY,
+                user_id    TEXT NOT NULL,
+                username   TEXT NOT NULL,
+                role       TEXT NOT NULL DEFAULT 'user',
+                expires_at TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+            "#,
+        ).map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?;
+
+        conn.execute_batch(
+            // --- Role permissions (RBAC) ---
+            r#"
+            CREATE TABLE IF NOT EXISTS role_permissions (
+                role       TEXT NOT NULL,
+                permission TEXT NOT NULL,
+                PRIMARY KEY (role, permission)
+            );
+            "#,
+        ).map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?;
+
+        // Seed default permissions
+        let seeds = [
+            ("admin", "users.manage"), ("admin", "websites.manage"), ("admin", "settings.manage"), ("admin", "ssl.manage"),
+            ("user", "websites.view"), ("user", "websites.manage"),
+            ("viewer", "websites.view"),
+        ];
+        for (r, p) in seeds {
+            let _ = conn.execute("INSERT OR IGNORE INTO role_permissions (role, permission) VALUES (?1, ?2)", rusqlite::params![r, p]);
+        }
+
+        conn.execute_batch(
             // --- Audit log ---
             r#"
             CREATE TABLE IF NOT EXISTS audit_log (
@@ -134,7 +171,7 @@ impl PanelDb {
                 rusqlite::params![
                     uuid::Uuid::new_v4().to_string(),
                     "admin",
-                    "$2y$12$LQv3c1yqBWVHxkd0LHAkCOYz6TtxMQJqhN8/LewdBPj4J/HS.iK8O", // "admin" bcrypt
+                    "admin",
                     "admin",
                     "admin@localhost",
                 ],

@@ -566,6 +566,17 @@ pub fn panel_html() -> String {
     </style>
 </head>
 <body x-data="larvaPanel()" x-init="init()" @keydown.escape.window="closeModal()" class="min-h-screen">
+<div x-cloak x-show="showLogin" class="fixed inset-0 z-50 flex items-center justify-center bg-gray-900">
+  <div class="bg-white rounded-lg p-8 w-96 shadow-xl">
+    <h2 class="text-xl font-bold mb-4">LarvaPHP Panel Login</h2>
+    <div class="space-y-3">
+      <input x-model="loginForm.username" class="w-full border px-3 py-2 rounded" placeholder="Username">
+      <input x-model="loginForm.password" type="password" class="w-full border px-3 py-2 rounded" placeholder="Password" @keydown.enter="doLogin()">
+      <button @click="doLogin()" class="w-full bg-indigo-600 text-white py-2 rounded">Login</button>
+      <p x-show="loginError" x-text="loginError" class="text-red-600 text-sm"></p>
+    </div>
+  </div>
+</div>
 
     <!-- Mobile overlay -->
     <div x-cloak x-show="sidebarOpen"
@@ -630,28 +641,55 @@ pub fn panel_html() -> String {
             <button @click="navigate('files')" class="nav-btn" :class="{ 'nav-item-active': currentPage === 'files' }">
                 <i class="fa fa-folder"></i> <span>File Manager</span>
             </button>
-            <button @click="navigate('installer')" class="nav-btn" :class="{ 'nav-item-active': currentPage === 'installer' }">
-                <i class="fa fa-download"></i> <span>Installer</span>
-            </button>
-            <button @click="navigate('mysql')" class="nav-btn" :class="{ 'nav-item-active': currentPage === 'mysql' }">
-                <i class="fa fa-database"></i> <span>MySQL Accounts</span>
-            </button>
-            <button @click="navigate('postgres')" class="nav-btn" :class="{ 'nav-item-active': currentPage === 'postgres' }">
-                <i class="fa fa-database"></i> <span>PostgreSQL Accounts</span>
-            </button>
+            <div>
+                <button @click="dbOpen = !dbOpen" class="nav-btn w-full flex items-center justify-between">
+                    <span><i class="fa fa-database"></i> Databases</span>
+                    <i class="fa" :class="dbOpen ? 'fa-chevron-down' : 'fa-chevron-right'"></i>
+                </button>
+                <div x-show="dbOpen" x-transition class="pl-4 space-y-1 mt-1">
+                    <button @click="navigate('mysql')" class="nav-btn" :class="{ 'nav-item-active': currentPage === 'mysql' }">
+                        <i class="fa fa-server" style="color:#00758f"></i> <span>MySQL</span>
+                    </button>
+                    <button @click="navigate('postgres')" class="nav-btn" :class="{ 'nav-item-active': currentPage === 'postgres' }">
+                        <i class="fa fa-database" style="color:#336791"></i> <span>PostgreSQL</span>
+                    </button>
+                </div>
+            </div>
             <button @click="navigate('ftp')" class="nav-btn" :class="{ 'nav-item-active': currentPage === 'ftp' }">
                 <i class="fa fa-folder-open"></i> <span>FTP Accounts</span>
             </button>
-            <button @click="navigate('users')" class="nav-btn" :class="{ 'nav-item-active': currentPage === 'users' }">
-                <i class="fa fa-users"></i> <span>Users</span>
-            </button>
-            <button @click="navigate('settings')" class="nav-btn" :class="{ 'nav-item-active': currentPage === 'settings' }">
-                <i class="fa fa-sliders-h"></i> <span>Settings</span>
-            </button>
+            <div>
+                <button @click="usersOpen = !usersOpen" class="nav-btn w-full flex items-center justify-between">
+                    <span><i class="fa fa-users"></i> Users</span>
+                    <i class="fa" :class="usersOpen ? 'fa-chevron-down' : 'fa-chevron-right'"></i>
+                </button>
+                <div x-show="usersOpen" x-transition class="pl-4 space-y-1 mt-1">
+                    <button @click="navigate('users')" class="nav-btn" :class="{ 'nav-item-active': currentPage === 'users' }">
+                        <i class="fa fa-users"></i> <span>Users</span>
+                    </button>
+                    <button @click="navigate('permissions')" class="nav-btn" :class="{ 'nav-item-active': currentPage === 'permissions' }">
+                        <i class="fa fa-key"></i> <span>Permissions</span>
+                    </button>
+                </div>
+            </div>
+            <div>
+                <button @click="systemOpen = !systemOpen" class="nav-btn w-full flex items-center justify-between">
+                    <span><i class="fa fa-cog"></i> System</span>
+                    <i class="fa" :class="systemOpen ? 'fa-chevron-down' : 'fa-chevron-right'"></i>
+                </button>
+                <div x-show="systemOpen" x-transition class="pl-4 space-y-1 mt-1">
+                    <button @click="navigate('installer')" class="nav-btn" :class="{ 'nav-item-active': currentPage === 'installer' }">
+                        <i class="fa fa-download"></i> <span>Thirdparty</span>
+                    </button>
+                    <button @click="navigate('settings')" class="nav-btn" :class="{ 'nav-item-active': currentPage === 'settings' }">
+                        <i class="fa fa-sliders-h"></i> <span>Settings</span>
+                    </button>
+                </div>
+            </div>
         </nav>
 
         <div class="mt-auto p-3.5 border-t border-slate-100 shrink-0">
-            <button @click="sidebarOpen = false; showAlert('Session active', 'info')" class="w-full btn-text text-sm text-slate-600 hover:text-red-600 hover:bg-red-50 flex items-center gap-2.5 px-3 py-2 rounded-lg">
+            <button @click="sidebarOpen = false; logout()" class="w-full btn-text text-sm text-slate-600 hover:text-red-600 hover:bg-red-50 flex items-center gap-2.5 px-3 py-2 rounded-lg">
                 <i class="fa fa-power-off"></i> <span>Logout</span>
             </button>
         </div>
@@ -880,6 +918,7 @@ pub fn panel_html() -> String {
                                     <th>PHP Version</th>
                                     <th>SSL</th>
                                     <th>Workers</th>
+                                    <th>Port</th>
                                     <th>Status</th>
                                     <th>Actions</th>
                                 </tr>
@@ -895,6 +934,7 @@ pub fn panel_html() -> String {
                                         <td><span class="badge badge-primary font-mono" x-text="'PHP ' + site.php_version"></span></td>
                                         <td><span class="badge" :class="site.ssl_enabled ? 'badge-success' : 'badge-default'" x-text="site.ssl_enabled ? 'Active' : 'Inactive'"></span></td>
                                         <td class="font-mono text-sm" x-text="site.worker_count"></td>
+                                        <td class="font-mono text-sm" x-text="site.listen_port || 'default'"></td>
                                         <td><span class="badge" :class="site.is_active ? 'badge-success' : 'badge-default'" x-text="site.is_active ? 'Online' : 'Offline'"></span></td>
                                         <td>
                                             <div class="flex gap-1">
@@ -1069,164 +1109,6 @@ pub fn panel_html() -> String {
                 </div>
             </div>
 
-            <!-- Installer -->
-            <div x-cloak x-show="currentPage === 'installer'"
-                 x-transition:enter="transition ease-out duration-300"
-                 x-transition:enter-start="opacity-0 translate-y-3"
-                 x-transition:enter-end="opacity-100 translate-y-0"
-                 class="space-y-5">
-                <div class="flex flex-wrap justify-between items-center gap-3">
-                    <div class="text-sm text-slate-500">Install third-party services/tools via OS package manager (with binary fallback)</div>
-                    <button @click="loadInstaller()" class="btn-default inline-flex items-center gap-2">
-                        <i class="fa fa-sync" :class="{ 'animate-spin': installerBusy }"></i> Refresh
-                    </button>
-                </div>
-                <div class="fancy-card">
-                    <div class="table-wrapper">
-                        <table>
-                            <thead><tr><th>Service</th><th>Description</th><th>Status</th><th>Actions</th></tr></thead>
-                            <tbody>
-                                <template x-for="svc in installerServices" :key="svc.id">
-                                    <tr>
-                                        <td class="font-semibold text-slate-900" x-text="svc.name"></td>
-                                        <td class="text-sm text-slate-500" x-text="svc.description"></td>
-                                        <td>
-                                            <span class="badge" :class="svc.installed ? 'badge-success' : 'badge-default'" x-text="svc.installed ? 'Installed' : 'Not installed'"></span>
-                                        </td>
-                                        <td>
-                                            <div class="flex gap-2">
-                                                <button x-show="!svc.installed" @click="installService(svc.id)" class="btn-primary text-xs px-3 py-1.5">Install</button>
-                                                <button x-show="svc.installed" @click="uninstallService(svc.id)" class="btn-text btn-danger-text text-xs px-3 py-1.5">Uninstall</button>
-                                            </div>
-                                        </td>
-                                    </tr>
-                                </template>
-                                <tr x-show="installerServices.length === 0">
-                                    <td colspan="4" class="text-center py-12 text-slate-400">Loading services...</td>
-                                </tr>
-                            </tbody>
-                        </table>
-                    </div>
-                </div>
-                <div x-show="installerBusy" class="text-sm text-indigo-600 flex items-center gap-2"><i class="fa fa-spinner animate-spin"></i> Working, please wait...</div>
-                <div x-show="installerMsg" class="text-sm font-medium" :class="installerOk ? 'text-emerald-600' : 'text-red-600'" x-text="installerMsg"></div>
-            </div>
-
-            <!-- MySQL Accounts -->
-            <div x-cloak x-show="currentPage === 'mysql'"
-                 x-transition:enter="transition ease-out duration-300"
-                 x-transition:enter-start="opacity-0 translate-y-3"
-                 x-transition:enter-end="opacity-100 translate-y-0"
-                 class="space-y-5">
-                <div class="flex flex-wrap justify-between items-center gap-3">
-                    <div class="text-sm text-slate-500">Manage MySQL database users</div>
-                    <button @click="loadMysqlAccounts()" class="btn-default inline-flex items-center gap-2"><i class="fa fa-sync"></i> Refresh</button>
-                </div>
-                <div class="fancy-card p-5 space-y-3">
-                    <div class="grid grid-cols-1 sm:grid-cols-4 gap-2.5">
-                        <input class="input-default" placeholder="username" x-model="mysqlForm.username">
-                        <input class="input-default" placeholder="password" type="password" x-model="mysqlForm.password">
-                        <input class="input-default" placeholder="host" x-model="mysqlForm.host">
-                        <button @click="createMysqlAccount()" class="btn-primary">Create</button>
-                    </div>
-                    <div x-show="mysqlMsg" class="text-sm font-medium" :class="mysqlOk ? 'text-emerald-600' : 'text-red-600'" x-text="mysqlMsg"></div>
-                </div>
-                <div class="fancy-card">
-                    <div class="table-wrapper">
-                        <table>
-                            <thead><tr><th>User</th><th class="text-right">Actions</th></tr></thead>
-                            <tbody>
-                                <template x-for="u in mysqlAccounts" :key="u">
-                                    <tr>
-                                        <td x-text="u" class="font-mono text-sm"></td>
-                                        <td class="text-right"><button @click="deleteMysqlAccount(u.split('\t')[0])" class="btn-text btn-danger-text text-xs">Delete</button></td>
-                                    </tr>
-                                </template>
-                                <tr x-show="mysqlAccounts.length === 0">
-                                    <td colspan="2" class="text-center py-10 text-slate-400">No accounts / mysql CLI not available</td>
-                                </tr>
-                            </tbody>
-                        </table>
-                    </div>
-                </div>
-            </div>
-
-            <!-- PostgreSQL Accounts -->
-            <div x-cloak x-show="currentPage === 'postgres'"
-                 x-transition:enter="transition ease-out duration-300"
-                 x-transition:enter-start="opacity-0 translate-y-3"
-                 x-transition:enter-end="opacity-100 translate-y-0"
-                 class="space-y-5">
-                <div class="flex flex-wrap justify-between items-center gap-3">
-                    <div class="text-sm text-slate-500">Manage PostgreSQL database users</div>
-                    <button @click="loadPostgresAccounts()" class="btn-default inline-flex items-center gap-2"><i class="fa fa-sync"></i> Refresh</button>
-                </div>
-                <div class="fancy-card p-5 space-y-3">
-                    <div class="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
-                        <input class="input-default" placeholder="username" x-model="pgForm.username">
-                        <input class="input-default" placeholder="password" type="password" x-model="pgForm.password">
-                        <button @click="createPostgresAccount()" class="btn-primary">Create</button>
-                    </div>
-                    <div x-show="pgMsg" class="text-sm font-medium" :class="pgOk ? 'text-emerald-600' : 'text-red-600'" x-text="pgMsg"></div>
-                </div>
-                <div class="fancy-card">
-                    <div class="table-wrapper">
-                        <table>
-                            <thead><tr><th>User</th><th class="text-right">Actions</th></tr></thead>
-                            <tbody>
-                                <template x-for="u in postgresAccounts" :key="u">
-                                    <tr>
-                                        <td x-text="u" class="font-mono text-sm"></td>
-                                        <td class="text-right"><button @click="deletePostgresAccount(u)" class="btn-text btn-danger-text text-xs">Delete</button></td>
-                                    </tr>
-                                </template>
-                                <tr x-show="postgresAccounts.length === 0">
-                                    <td colspan="2" class="text-center py-10 text-slate-400">No accounts / psql not available</td>
-                                </tr>
-                            </tbody>
-                        </table>
-                    </div>
-                </div>
-            </div>
-
-            <!-- FTP Accounts -->
-            <div x-cloak x-show="currentPage === 'ftp'"
-                 x-transition:enter="transition ease-out duration-300"
-                 x-transition:enter-start="opacity-0 translate-y-3"
-                 x-transition:enter-end="opacity-100 translate-y-0"
-                 class="space-y-5">
-                <div class="flex flex-wrap justify-between items-center gap-3">
-                    <div class="text-sm text-slate-500">Manage FTP users</div>
-                    <button @click="loadFtpAccounts()" class="btn-default inline-flex items-center gap-2"><i class="fa fa-sync"></i> Refresh</button>
-                </div>
-                <div class="fancy-card p-5 space-y-3">
-                    <div class="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
-                        <input class="input-default" placeholder="username" x-model="ftpForm.username">
-                        <input class="input-default" placeholder="password" type="password" x-model="ftpForm.password">
-                        <button @click="createFtpAccount()" class="btn-primary">Create</button>
-                    </div>
-                    <div x-show="ftpMsg" class="text-sm font-medium" :class="ftpOk ? 'text-emerald-600' : 'text-red-600'" x-text="ftpMsg"></div>
-                </div>
-                <div class="fancy-card">
-                    <div class="table-wrapper">
-                        <table>
-                            <thead><tr><th>User</th><th class="text-right">Actions</th></tr></thead>
-                            <tbody>
-                                <template x-for="u in ftpAccounts" :key="u">
-                                    <tr>
-                                        <td x-text="u" class="font-mono text-sm"></td>
-                                        <td class="text-right"><button @click="deleteFtpAccount(u)" class="btn-text btn-danger-text text-xs">Delete</button></td>
-                                    </tr>
-                                </template>
-                                <tr x-show="ftpAccounts.length === 0">
-                                    <td colspan="2" class="text-center py-10 text-slate-400">No accounts</td>
-                                </tr>
-                            </tbody>
-                        </table>
-                    </div>
-                </div>
-            </div>
-
             <!-- Users -->
             <div x-cloak x-show="currentPage === 'users'"
                  x-transition:enter="transition ease-out duration-300"
@@ -1266,6 +1148,28 @@ pub fn panel_html() -> String {
                         </table>
                     </div>
                 </div>
+            </div>
+
+            <!-- Permissions -->
+            <div x-cloak x-show="currentPage === 'permissions'"
+                 x-transition:enter="transition ease-out duration-300"
+                 x-transition:enter-start="opacity-0 translate-y-3"
+                 x-transition:enter-end="opacity-100 translate-y-0"
+                 class="space-y-5">
+                <div class="text-sm text-slate-500">Manage permissions per role</div>
+                <template x-for="(perms, role) in roles" :key="role">
+                    <div class="fancy-card p-4 mb-3">
+                        <h3 class="font-bold mb-2" x-text="role"></h3>
+                        <div class="flex flex-wrap gap-3">
+                            <template x-for="p in ['users.manage','websites.view','websites.manage','settings.manage','ssl.manage']" :key="p">
+                                <label class="flex items-center gap-1 text-sm">
+                                    <input type="checkbox" :checked="perms.includes(p)" @change="togglePerm(role,p)">
+                                    <span x-text="p"></span>
+                                </label>
+                            </template>
+                        </div>
+                    </div>
+                </template>
             </div>
 
             <!-- Settings -->
@@ -1355,6 +1259,10 @@ pub fn panel_html() -> String {
                     <div class="form-group">
                         <label class="form-label">Worker Count</label>
                         <input type="number" class="input-default" x-model.number="newWebsite.worker_count" min="1">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Listen Port (optional)</label>
+                        <input type="number" class="input-default" x-model.number="newWebsite.listen_port" placeholder="default (80/443)">
                     </div>
                 </div>
                 <div class="form-group flex items-center gap-2.5">
@@ -1469,6 +1377,7 @@ pub fn panel_html() -> String {
             workers: { title: 'PHP Workers', subtitle: 'Monitor and control embedded PHP worker processes' },
             files: { title: 'File Manager', subtitle: 'Browse and inspect files on the server' },
             installer: { title: 'Installer', subtitle: 'Install third-party services and tools via OS package manager' },
+            permissions: { title: 'Permissions', subtitle: 'Manage user roles and access control' },
             mysql: { title: 'MySQL Accounts', subtitle: 'Manage MySQL database users' },
             postgres: { title: 'PostgreSQL Accounts', subtitle: 'Manage PostgreSQL database users' },
             ftp: { title: 'FTP Accounts', subtitle: 'Manage FTP users' },
@@ -1485,13 +1394,21 @@ pub fn panel_html() -> String {
                 ssl_enabled: false,
                 acme_email: '',
                 acme_domains: '',
-                worker_count: 1
+                worker_count: 1,
+                listen_port: null
             };
         }
 
         document.addEventListener('alpine:init', () => {
             Alpine.data('larvaPanel', () => ({
                 currentPage: 'dashboard',
+                dbOpen: false,
+                usersOpen: false,
+                systemOpen: false,
+                authToken: (localStorage.getItem('larva_token') || ''),
+                showLogin: false,
+                loginForm: { username: 'admin', password: 'admin' },
+                loginError: '',
                 sidebarOpen: false,
                 isRefreshing: false,
                 lastUpdated: '',
@@ -1514,6 +1431,7 @@ pub fn panel_html() -> String {
                 workers: [],
                 files: [],
                 users: [],
+                roles: {},
                 fileDir: '/',
                 installerServices: [],
                 installerBusy: false,
@@ -1550,12 +1468,18 @@ pub fn panel_html() -> String {
                 },
 
                 async init() {
+                    const h = (location.hash || '').replace('#/','');
+                    if (h) this.currentPage = h;
+                    if (!this.authToken) { this.showLogin = true; return; }
+                    try { await this.api('/auth/me'); } catch (e) { this.authToken=''; localStorage.removeItem('larva_token'); this.showLogin=true; return; }
                     await this.refreshAll();
                     setInterval(() => this.fetchStats(), 15000);
+                    window.addEventListener('hashchange', () => { const h=(location.hash||'').replace('#/',''); if(h) this.currentPage=h; });
                 },
 
                 navigate(page) {
                     this.currentPage = page;
+                    location.hash = '#/'+page;
                     this.sidebarOpen = false;
                     if (page === 'websites') this.fetchWebsites();
                     else if (page === 'ssl') this.fetchSsl();
@@ -1566,10 +1490,12 @@ pub fn panel_html() -> String {
                     else if (page === 'postgres') this.loadPostgresAccounts();
                     else if (page === 'ftp') this.loadFtpAccounts();
                     else if (page === 'users') this.fetchUsers();
+                    else if (page === 'permissions') this.fetchRoles();
                 },
 
                 async api(path, method = 'GET', body = null) {
                     const opts = { method, headers: { 'Content-Type': 'application/json' } };
+                    if (this.authToken) opts.headers['Authorization'] = 'Bearer ' + this.authToken;
                     if (body) opts.body = JSON.stringify(body);
                     const res = await fetch('/api' + path, opts);
                     const data = await res.json();
@@ -1586,6 +1512,28 @@ pub fn panel_html() -> String {
                     this.alertTimer = setTimeout(() => { this.alert = null; }, 4500);
                 },
 
+                async doLogin() {
+                    this.loginError = '';
+                    try {
+                        const res = await fetch('/api/auth/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(this.loginForm) });
+                        const data = await res.json();
+                        if (!res.ok || data.success === false) throw new Error(data.error || 'Login failed');
+                        this.authToken = data.data.token;
+                        localStorage.setItem('larva_token', this.authToken);
+                        this.showLogin = false;
+                        await this.refreshAll();
+                    } catch (e) { this.loginError = e.message; }
+                },
+                logout() { this.authToken=''; localStorage.removeItem('larva_token'); this.showLogin=true; },
+                async fetchRoles() {
+                    try { const d = await this.api('/roles'); this.roles = d.data; } catch(e) { this.alert = e.message; }
+                },
+                async togglePerm(role, perm) {
+                    const cur = this.roles[role] || [];
+                    const next = cur.includes(perm) ? cur.filter(p=>p!==perm) : [...cur, perm];
+                    this.roles[role] = next;
+                    await this.api('/roles/'+role+'/permissions','PUT',{permissions:next});
+                },
                 async refreshAll() {
                     this.isRefreshing = true;
                     try {
