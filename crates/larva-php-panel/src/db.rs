@@ -121,7 +121,7 @@ impl PanelDb {
                 expires_at TEXT NOT NULL,
                 created_at TEXT NOT NULL DEFAULT (datetime('now'))
             );
-            ",
+            "#,
         ).map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?;
 
         conn.execute_batch(
