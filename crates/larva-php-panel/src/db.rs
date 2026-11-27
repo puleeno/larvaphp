@@ -135,6 +135,20 @@ impl PanelDb {
             "#,
         ).map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?;
 
+        conn.execute_batch(
+            // --- Listeners (OpenLiteSpeed-style) ---
+            r#"
+            CREATE TABLE IF NOT EXISTS listeners (
+                id        TEXT PRIMARY KEY,
+                name      TEXT NOT NULL,
+                address   TEXT NOT NULL DEFAULT '0.0.0.0',
+                port      INTEGER NOT NULL,
+                protocol  TEXT NOT NULL DEFAULT 'http',
+                is_active INTEGER NOT NULL DEFAULT 1
+            );
+            "#,
+        ).map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?;
+
         // Seed default permissions
         let seeds = [
             ("admin", "users.manage"), ("admin", "websites.manage"), ("admin", "settings.manage"), ("admin", "ssl.manage"),

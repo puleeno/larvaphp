@@ -681,6 +681,9 @@ pub fn panel_html() -> String {
                     <button @click="navigate('installer')" class="nav-btn" :class="{ 'nav-item-active': currentPage === 'installer' }">
                         <i class="fa fa-download"></i> <span>Thirdparty</span>
                     </button>
+                    <button @click="navigate('listeners')" class="nav-btn" :class="{ 'nav-item-active': currentPage === 'listeners' }">
+                        <i class="fa fa-plug"></i> <span>Listeners</span>
+                    </button>
                     <button @click="navigate('settings')" class="nav-btn" :class="{ 'nav-item-active': currentPage === 'settings' }">
                         <i class="fa fa-sliders-h"></i> <span>Settings</span>
                     </button>
@@ -1172,6 +1175,37 @@ pub fn panel_html() -> String {
                 </template>
             </div>
 
+            <!-- Listeners -->
+            <div x-cloak x-show="currentPage === 'listeners'"
+                 x-transition:enter="transition ease-out duration-300"
+                 x-transition:enter-start="opacity-0 translate-y-3"
+                 x-transition:enter-end="opacity-100 translate-y-0"
+                 class="space-y-5">
+                <div class="flex justify-between items-center">
+                    <div class="text-sm text-slate-500" x-text="listeners.length + ' listener(s)'"></div>
+                    <button @click="addListener()" class="btn-primary inline-flex items-center gap-2"><i class="fa fa-plus"></i> Add Listener</button>
+                </div>
+                <div class="fancy-card">
+                    <div class="table-wrapper">
+                        <table>
+                            <thead><tr><th>Name</th><th>Address</th><th>Port</th><th>Protocol</th><th>Status</th><th></th></tr></thead>
+                            <tbody>
+                                <template x-for="l in listeners" :key="l.id">
+                                    <tr>
+                                        <td x-text="l.name"></td>
+                                        <td x-text="l.address"></td>
+                                        <td x-text="l.port"></td>
+                                        <td x-text="l.protocol"></td>
+                                        <td x-text="l.is_active ? 'Active' : 'Inactive'"></td>
+                                        <td><button @click="delListener(l.id)" class="text-red-600 text-sm">Delete</button></td>
+                                    </tr>
+                                </template>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
             <!-- Settings -->
             <div x-cloak x-show="currentPage === 'settings'"
                  x-transition:enter="transition ease-out duration-300"
@@ -1378,6 +1412,7 @@ pub fn panel_html() -> String {
             files: { title: 'File Manager', subtitle: 'Browse and inspect files on the server' },
             installer: { title: 'Installer', subtitle: 'Install third-party services and tools via OS package manager' },
             permissions: { title: 'Permissions', subtitle: 'Manage user roles and access control' },
+            listeners: { title: 'Listeners', subtitle: 'Manage server listeners (OpenLiteSpeed-style)' },
             mysql: { title: 'MySQL Accounts', subtitle: 'Manage MySQL database users' },
             postgres: { title: 'PostgreSQL Accounts', subtitle: 'Manage PostgreSQL database users' },
             ftp: { title: 'FTP Accounts', subtitle: 'Manage FTP users' },
@@ -1431,6 +1466,7 @@ pub fn panel_html() -> String {
                 workers: [],
                 files: [],
                 users: [],
+                listeners: [],
                 roles: {},
                 fileDir: '/',
                 installerServices: [],
@@ -1491,6 +1527,7 @@ pub fn panel_html() -> String {
                     else if (page === 'ftp') this.loadFtpAccounts();
                     else if (page === 'users') this.fetchUsers();
                     else if (page === 'permissions') this.fetchRoles();
+                    else if (page === 'listeners') this.fetchListeners();
                 },
 
                 async api(path, method = 'GET', body = null) {
@@ -1525,6 +1562,19 @@ pub fn panel_html() -> String {
                     } catch (e) { this.loginError = e.message; }
                 },
                 logout() { this.authToken=''; localStorage.removeItem('larva_token'); this.showLogin=true; },
+                async fetchListeners() {
+                    try { const d = await this.api('/listeners'); this.listeners = d.data; } catch(e) { this.alert = e.message; }
+                },
+                async addListener() {
+                    const name = prompt('Listener name:'); if (!name) return;
+                    const port = prompt('Port:','8080'); if (!port) return;
+                    await this.api('/listeners','POST',{name, port: parseInt(port), address:'0.0.0.0', protocol:'http'});
+                    await this.fetchListeners();
+                },
+                async delListener(id) {
+                    await this.api('/listeners/'+id,'DELETE');
+                    await this.fetchListeners();
+                },
                 async fetchRoles() {
                     try { const d = await this.api('/roles'); this.roles = d.data; } catch(e) { this.alert = e.message; }
                 },

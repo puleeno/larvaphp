@@ -110,6 +110,8 @@ impl PanelState {
             .route("/api/roles/{role}/permissions", axum::routing::put(update_role_permissions))
             .route("/api/files", get(list_files))
             .route("/api/settings", get(list_settings).put(update_setting))
+            .route("/api/listeners", get(list_listeners).post(create_listener))
+            .route("/api/listeners/{id}", delete(delete_listener))
             .route("/api/server/reload", post(reload_server))            .route("/api/auth/login", post(login))
             .route("/api/auth/me", get(me))
             .route_layer(middleware::from_fn_with_state(state.clone(), auth_middleware))
@@ -616,6 +618,58 @@ async fn update_role_permissions(
     match result {
         Ok(_) => api_json("ok".to_string()),
         Err(e) => api_err(&format!("update role perms: {}", e)),
+    }
+}
+
+async fn list_listeners(State(state): State<PanelState>) -> Json<ApiResponse<serde_json::Value>> {
+    let result: Result<_, rusqlite::Error> = (move || {
+        let conn = state.db.inner.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT id, name, address, port, protocol, is_active FROM listeners ORDER BY port")?;
+        let rows = stmt.query_map([], |r| Ok(serde_json::json!({
+            "id": r.get::<_,String>(0)?,
+            "name": r.get::<_,String>(1)?,
+            "address": r.get::<_,String>(2)?,
+            "port": r.get::<_,i64>(3)?,
+            "protocol": r.get::<_,String>(4)?,
+            "is_active": r.get::<_,i64>(5)? != 0,
+        })))?;
+        let mut out = Vec::new();
+        for row in rows { out.push(row?); }
+        Ok(serde_json::Value::Array(out))
+    })();
+    match result {
+        Ok(v) => api_json(v),
+        Err(e) => api_err(&format!("list listeners: {}", e)),
+    }
+}
+
+async fn create_listener(State(state): State<PanelState>, Json(payload): Json<serde_json::Value>) -> Json<ApiResponse<String>> {
+    let id = short_id();
+    let name = payload.get("name").and_then(|v| v.as_str()).unwrap_or("listener").to_string();
+    let address = payload.get("address").and_then(|v| v.as_str()).unwrap_or("0.0.0.0").to_string();
+    let port = payload.get("port").and_then(|v| v.as_i64()).unwrap_or(8080);
+    let protocol = payload.get("protocol").and_then(|v| v.as_str()).unwrap_or("http").to_string();
+    let result: Result<(), rusqlite::Error> = (move || {
+        let conn = state.db.inner.lock().unwrap();
+        conn.execute("INSERT INTO listeners (id, name, address, port, protocol, is_active) VALUES (?1,?2,?3,?4,?5,1)",
+            rusqlite::params![id, name, address, port, protocol])?;
+        Ok(())
+    })();
+    match result {
+        Ok(_) => api_json("ok".to_string()),
+        Err(e) => api_err(&format!("create listener: {}", e)),
+    }
+}
+
+async fn delete_listener(State(state): State<PanelState>, Path(id): Path<String>) -> Json<ApiResponse<String>> {
+    let result: Result<(), rusqlite::Error> = (move || {
+        let conn = state.db.inner.lock().unwrap();
+        conn.execute("DELETE FROM listeners WHERE id = ?1", rusqlite::params![id])?;
+        Ok(())
+    })();
+    match result {
+        Ok(_) => api_json("ok".to_string()),
+        Err(e) => api_err(&format!("delete listener: {}", e)),
     }
 }
 
