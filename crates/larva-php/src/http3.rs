@@ -46,6 +46,12 @@ pub mod imp {
     /// Max requests waiting to be handed to the PHP/static-file workers.
     const REQUEST_QUEUE_CAP: usize = 256;
 
+    /// Embedded PHP's compiler needs far more stack than Rust's default 2 MiB
+    /// worker stack. With the default, PHP aborts every request with
+    /// "Maximum call stack size of 2048000 bytes ... Infinite recursion?" even
+    /// for a trivial script. Match the 64 MiB stack used by the embedded tests.
+    pub(crate) const H3_WORKER_STACK_SIZE: usize = 64 * 1024 * 1024;
+
     /// Minimal headers for HTTP/3 errors produced before the shared request
     /// core runs. `content-length` is added by `send_h3_response`.
     fn direct_error_headers() -> Vec<(String, String)> {
@@ -477,6 +483,7 @@ pub mod imp {
             let tx = result_tx.clone();
             std::thread::Builder::new()
                 .name(format!("larva-h3-worker-{id}"))
+                .stack_size(H3_WORKER_STACK_SIZE)
                 .spawn(move || {
                     while let Ok(job) = rx.recv() {
                         let result = server
@@ -706,12 +713,10 @@ pub use imp::*;
 mod tests {
     use super::*;
     #[cfg(feature = "http3")]
-    use super::imp::h3_request_parts;
+    use super::imp::{h3_request_parts, H3_WORKER_STACK_SIZE};
+    use crate::server::Server;
     #[cfg(feature = "http3")]
     use quiche::h3;
-    #[cfg(feature = "http3")]
-    use quiche::h3::NameValue;
-    use crate::server::Server;
     use std::sync::Arc;
 
     fn test_server() -> Arc<Server> {
@@ -816,6 +821,31 @@ mod tests {
             .filter_map(|(name, value)| name.eq_ignore_ascii_case("host").then_some(value))
             .collect();
         assert_eq!(hosts, vec![&"nghesachxua.vn".to_string()]);
+    }
+
+    #[cfg(feature = "http3")]
+    #[test]
+    fn h3_worker_stack_is_large_enough_for_php() {
+        assert!(H3_WORKER_STACK_SIZE >= 16 * 1024 * 1024);
+
+        // Exercise a real thread with the production stack size, not just the
+        // constant, so a platform that ignores/clamps it is caught here.
+        let parts = std::thread::Builder::new()
+            .stack_size(H3_WORKER_STACK_SIZE)
+            .spawn(|| {
+                let headers = [
+                    h3::Header::new(b":method", b"GET"),
+                    h3::Header::new(b":authority", b"nghesachxua.vn"),
+                    h3::Header::new(b":path", b"/probe.php"),
+                ];
+                h3_request_parts(&headers)
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+
+        assert_eq!(parts.0, "GET");
+        assert_eq!(parts.1, "/probe.php");
     }
 
     #[cfg(feature = "http3")]

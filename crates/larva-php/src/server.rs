@@ -742,6 +742,7 @@ impl Server {
         ctx.validate()?;
         // HTTP/3 always terminates TLS; make the cache key and WordPress see it.
         ctx.https = "on".to_string();
+        ctx.server_port = "443".to_string();
 
         if let Some(page) = self.edge_cache.lookup(&ctx) {
             let status = StatusCode::from_u16(page.status).unwrap_or(StatusCode::OK);
