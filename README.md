@@ -50,6 +50,8 @@ larva-php/
 
 ## Features
 
+![LarvaPHP features](feature.png)
+
 - **PHP 8.2+ support** via Zend Engine C API (embedded, not CGI)
 - **High-performance HTTP server** built on Hyper/Tokio
 - **Multi-tenant virtual hosts**: one port, many isolated sites selected by `Host` header (Nginx/Apache/LiteSpeed/Caddy-style)
