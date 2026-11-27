@@ -650,9 +650,20 @@ pub fn panel_html() -> String {
             <button @click="navigate('ftp')" class="nav-btn" :class="{ 'nav-item-active': currentPage === 'ftp' }">
                 <i class="fa fa-folder-open"></i> <span>FTP Accounts</span>
             </button>
-            <button @click="navigate('users')" class="nav-btn" :class="{ 'nav-item-active': currentPage === 'users' }">
-                <i class="fa fa-users"></i> <span>Users</span>
-            </button>
+            <div>
+                <button @click="usersOpen = !usersOpen" class="nav-btn w-full flex items-center justify-between">
+                    <span><i class="fa fa-users"></i> Users</span>
+                    <i class="fa" :class="usersOpen ? 'fa-chevron-down' : 'fa-chevron-right'"></i>
+                </button>
+                <div x-show="usersOpen" x-transition class="pl-4 space-y-1 mt-1">
+                    <button @click="navigate('users')" class="nav-btn" :class="{ 'nav-item-active': currentPage === 'users' }">
+                        <i class="fa fa-users"></i> <span>Users</span>
+                    </button>
+                    <button @click="navigate('permissions')" class="nav-btn" :class="{ 'nav-item-active': currentPage === 'permissions' }">
+                        <i class="fa fa-key"></i> <span>Permissions</span>
+                    </button>
+                </div>
+            </div>
             <div>
                 <button @click="systemOpen = !systemOpen" class="nav-btn w-full flex items-center justify-between">
                     <span><i class="fa fa-cog"></i> System</span>
@@ -1131,6 +1142,39 @@ pub fn panel_html() -> String {
                 </div>
             </div>
 
+            <!-- Permissions -->
+            <div x-cloak x-show="currentPage === 'permissions'"
+                 x-transition:enter="transition ease-out duration-300"
+                 x-transition:enter-start="opacity-0 translate-y-3"
+                 x-transition:enter-end="opacity-100 translate-y-0"
+                 class="space-y-5">
+                <div class="text-sm text-slate-500" x-text="users.length + ' user(s) - assign roles'"></div>
+                <div class="fancy-card">
+                    <div class="table-wrapper">
+                        <table>
+                            <thead>
+                                <tr><th>Username</th><th>Role</th><th>Change Role</th></tr>
+                            </thead>
+                            <tbody>
+                                <template x-for="user in users" :key="user.id">
+                                    <tr>
+                                        <td class="font-mono text-sm font-semibold text-slate-900" x-text="user.username"></td>
+                                        <td><span class="badge badge-primary" x-text="user.role"></span></td>
+                                        <td>
+                                            <select class="border rounded px-2 py-1 text-sm" :value="user.role" @change="api('/users/'+user.id+'/role','PUT',{role:$event.target.value}).then(()=>fetchUsers())">
+                                                <option value="admin">admin</option>
+                                                <option value="user">user</option>
+                                                <option value="viewer">viewer</option>
+                                            </select>
+                                        </td>
+                                    </tr>
+                                </template>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
             <!-- Settings -->
             <div x-cloak x-show="currentPage === 'settings'"
                  x-transition:enter="transition ease-out duration-300"
@@ -1336,6 +1380,7 @@ pub fn panel_html() -> String {
             workers: { title: 'PHP Workers', subtitle: 'Monitor and control embedded PHP worker processes' },
             files: { title: 'File Manager', subtitle: 'Browse and inspect files on the server' },
             installer: { title: 'Installer', subtitle: 'Install third-party services and tools via OS package manager' },
+            permissions: { title: 'Permissions', subtitle: 'Manage user roles and access control' },
             mysql: { title: 'MySQL Accounts', subtitle: 'Manage MySQL database users' },
             postgres: { title: 'PostgreSQL Accounts', subtitle: 'Manage PostgreSQL database users' },
             ftp: { title: 'FTP Accounts', subtitle: 'Manage FTP users' },
@@ -1360,6 +1405,7 @@ pub fn panel_html() -> String {
         document.addEventListener('alpine:init', () => {
             Alpine.data('larvaPanel', () => ({
                 currentPage: 'dashboard',
+                usersOpen: false,
                 systemOpen: false,
                 authToken: (localStorage.getItem('larva_token') || ''),
                 showLogin: false,
@@ -1441,6 +1487,7 @@ pub fn panel_html() -> String {
                     else if (page === 'postgres') this.loadPostgresAccounts();
                     else if (page === 'ftp') this.loadFtpAccounts();
                     else if (page === 'users') this.fetchUsers();
+                    else if (page === 'permissions') this.fetchUsers();
                 },
 
                 async api(path, method = 'GET', body = null) {
