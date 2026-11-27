@@ -662,7 +662,7 @@ pub fn panel_html() -> String {
         </nav>
 
         <div class="mt-auto p-3.5 border-t border-slate-100 shrink-0">
-            <button @click="sidebarOpen = false; showAlert('Session active', 'info')" class="w-full btn-text text-sm text-slate-600 hover:text-red-600 hover:bg-red-50 flex items-center gap-2.5 px-3 py-2 rounded-lg">
+            <button @click="sidebarOpen = false; logout()" class="w-full btn-text text-sm text-slate-600 hover:text-red-600 hover:bg-red-50 flex items-center gap-2.5 px-3 py-2 rounded-lg">
                 <i class="fa fa-power-off"></i> <span>Logout</span>
             </button>
         </div>
