@@ -739,6 +739,10 @@ impl Server {
             .body(Full::new(Bytes::from(body.to_vec())))
             .map_err(|e| Error::Ffi(e.to_string()))?;
         let mut ctx = PhpContext::from_request(&req, Arc::new(Server::fallback()), vec![])?;
+        // from_request cannot know which Server instance handled this QUIC
+        // request. Keep the real document root so SCRIPT_NAME is relative to
+        // it (WordPress builds URLs/redirects from SCRIPT_NAME).
+        ctx.document_root = self.root.clone();
         ctx.validate()?;
         // HTTP/3 always terminates TLS; make the cache key and WordPress see it.
         ctx.https = "on".to_string();
@@ -1766,6 +1770,12 @@ params.push(("HTTP_HOST".into(), http_host.clone()));
             // WordPress' is_ssl() checks $_SERVER['HTTPS']; without this,
             // wp-admin redirects to https://localhost/wp-admin/ under HTTP/2.
             all_headers.push(("HTTPS".to_string(), ctx.https.clone()));
+            // The embedded SAPI derives SCRIPT_NAME/PHP_SELF from the absolute
+            // path when the request came from HTTP/3. Forward the CGI values
+            // explicitly so WordPress builds URIs from the document root.
+            all_headers.push(("SCRIPT_NAME".to_string(), script_name.clone()));
+            all_headers.push(("PHP_SELF".to_string(), script_name.clone()));
+            all_headers.push(("DOCUMENT_ROOT".to_string(), ctx.document_root.clone()));
             if let Some(cookie) = ctx
                 .env
                 .iter()

@@ -28,6 +28,27 @@ pub mod imp {
         PHP_LOCK.get_or_init(|| Mutex::new(()))
     }
 
+    /// Map a forwarded header to the `$_SERVER` key PHP should receive.
+    ///
+    /// `HTTPS` and the CGI path variables must stay verbatim: prefixing them
+    /// with `HTTP_` would hide them from `is_ssl()` and WordPress URL helpers.
+    pub(crate) fn server_var_key(header: &str) -> Option<String> {
+        if header.starts_with("HTTP_")
+            || header.eq_ignore_ascii_case("HTTPS")
+            || header.eq_ignore_ascii_case("SCRIPT_NAME")
+            || header.eq_ignore_ascii_case("PHP_SELF")
+            || header.eq_ignore_ascii_case("DOCUMENT_ROOT")
+        {
+            Some(header.to_string())
+        } else if header.eq_ignore_ascii_case("Content-Type")
+            || header.eq_ignore_ascii_case("Content-Length")
+        {
+            None // handled via SG(request_info)
+        } else {
+            Some(format!("HTTP_{}", header.to_ascii_uppercase().replace('-', "_")))
+        }
+    }
+
     /// Initialise the embedded runtime once. Returns Ok(()) on success.
     fn ensure_init() -> Result<()> {
         use std::sync::OnceLock;
@@ -155,14 +176,9 @@ pub mod imp {
         let mut server_keys: Vec<CString> = Vec::new();
         let mut server_vals: Vec<CString> = Vec::new();
         for (k, v) in &req.headers {
-            let key = if k.starts_with("HTTP_") || k.eq_ignore_ascii_case("HTTPS") {
-                k.clone()
-            } else if k.eq_ignore_ascii_case("Content-Type")
-                || k.eq_ignore_ascii_case("Content-Length")
-            {
-                continue; // handled via SG(request_info)
-            } else {
-                format!("HTTP_{}", k.to_ascii_uppercase().replace('-', "_"))
+            let key = match server_var_key(k) {
+                Some(key) => key,
+                None => continue,
             };
             if let (Ok(ck), Ok(cv)) = (CString::new(key), CString::new(v.as_str())) {
                 server_vars.push(larva_php_sys::LarvaEmbedServerVar {
@@ -318,6 +334,19 @@ pub use imp::*;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "embedded")]
+    #[test]
+    fn embedded_server_var_key_preserves_cgi_path_vars() {
+        let key = super::imp::server_var_key;
+        assert_eq!(key("SCRIPT_NAME").as_deref(), Some("SCRIPT_NAME"));
+        assert_eq!(key("PHP_SELF").as_deref(), Some("PHP_SELF"));
+        assert_eq!(key("DOCUMENT_ROOT").as_deref(), Some("DOCUMENT_ROOT"));
+        assert_eq!(key("HTTPS").as_deref(), Some("HTTPS"));
+        assert_eq!(key("x-test").as_deref(), Some("HTTP_X_TEST"));
+        assert_eq!(key("Content-Type"), None);
+        assert_eq!(key("Content-Length"), None);
+    }
 
     // ---- Non-embedded stubs (always compiled) ----
 
