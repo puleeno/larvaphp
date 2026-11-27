@@ -618,7 +618,7 @@ async fn login(
             let token = format!("larva_{}", short_id());
             // Persist session (RBAC)
             let conn = state2.db.inner.lock().unwrap();
-            let expires = chrono::Utc::now() + chrono::Duration::hours(24);
+            let expires = chrono::Utc::now() + chrono::Duration::minutes(15);
             let _ = conn.execute(
                 "INSERT INTO sessions (token, user_id, username, role, expires_at) VALUES (?1, ?2, ?3, ?4, ?5)",
                 rusqlite::params![token, user.id, user.username, user.role, expires.to_rfc3339()],
@@ -670,6 +670,7 @@ async fn auth_middleware(
     req: Request<axum::body::Body>,
     next: middleware::Next,
 ) -> axum::response::Response {
+    let state2 = state.clone();
     if req.method() == Method::OPTIONS {
         return next.run(req).await;
     }
@@ -694,6 +695,12 @@ async fn auth_middleware(
     if !valid {
         return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
     }
+    // Sliding session: refresh expiry on activity (15 min inactivity timeout)
+    let _ = (move || {
+        let conn = state2.db.inner.lock().unwrap();
+        conn.execute("UPDATE sessions SET expires_at = ?1 WHERE token = ?2", rusqlite::params![(chrono::Utc::now() + chrono::Duration::minutes(15)).to_rfc3339(), token])?;
+        Ok::<_, rusqlite::Error>(())
+    })();
     next.run(req).await
 }
 
