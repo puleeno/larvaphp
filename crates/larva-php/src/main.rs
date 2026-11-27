@@ -165,6 +165,28 @@ struct RouterReloader {
     router: std::sync::Arc<larva_php::server::VHostRouter>,
 }
 
+struct WorkerProviderImpl;
+
+#[cfg(feature = "panel")]
+impl larva_php::panel::WorkerProvider for WorkerProviderImpl {
+    fn list_workers(&self) -> Vec<larva_php::panel::api::WorkerStatus> {
+        let mut out = Vec::new();
+        if let Some(pool) = larva_php::runtime::pool() {
+            for (id, pid, busy) in pool.status() {
+                out.push(larva_php::panel::api::WorkerStatus {
+                    id: id.to_string(),
+                    name: format!("worker-{}", id),
+                    status: if busy { "busy".into() } else { "running".into() },
+                    pid,
+                    requests: 0,
+                    uptime: None,
+                });
+            }
+        }
+        out
+    }
+}
+
 #[cfg(feature = "panel")]
 impl larva_php::panel::VHostReloader for RouterReloader {
     fn reload(&self, websites: Vec<larva_php::panel::api::Website>) {
@@ -721,9 +743,11 @@ fn main() -> ExitCode {
                     };
 
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        rt.block_on(larva_php::panel::start_with_reloader(
+                        let wp = std::sync::Arc::new(WorkerProviderImpl);
+                        rt.block_on(larva_php::panel::start_with_reloader_and_workers(
                             &panel_addr,
                             Some(reloader),
+                            Some(wp),
                         ))
                     }));
 

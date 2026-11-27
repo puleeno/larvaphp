@@ -72,6 +72,11 @@ impl WorkerPool {
         })
     }
 
+    /// Return status snapshot of all workers.
+    pub fn status(&self) -> Vec<(usize, Option<u32>, bool)> {
+        self.workers.iter().map(|w| (w.id, Some(w.child.id()), w.busy.load(std::sync::atomic::Ordering::Relaxed))).collect()
+    }
+
     /// Dispatch a request to an idle worker and await its response.
     ///
     /// Round-robin alone queues two requests onto the same worker under load,
