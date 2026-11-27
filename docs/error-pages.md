@@ -1,8 +1,10 @@
 # Error pages (40x / 50x)
 
-LarvaPHP serves one shared, self-contained HTML page for every `4xx` and `5xx`
-response. The goal is a page that still looks intentional when PHP, the CMS, or
-the upstream is unhealthy — and that adds nothing to the normal request path.
+LarvaPHP serves one shared, self-contained HTML page for `4xx` and `5xx`
+responses by default. The goal is a page that still looks intentional when PHP,
+the CMS, or the upstream is unhealthy — and that adds nothing to the normal
+request path. Applications can explicitly opt out and keep their own error
+template or handler (see below).
 
 ## Design
 
@@ -29,7 +31,7 @@ the upstream is unhealthy — and that adds nothing to the normal request path.
 | Rate limit | `429` page with preserved `Retry-After` |
 | Request body over limit | `413` page |
 | PHP execution failure | `500` page |
-| PHP/CGI `Status:` header in `400..=599` | PHP body replaced with the shared page |
+| PHP/CGI `Status:` header in `400..=599` | PHP body replaced with the shared page, unless the app opts out |
 | Jankx edge-cache entry with an error status | cached body replaced with the shared page |
 | HTTP/3 worker error / full queue | `500` / `503` page |
 | ACME challenge miss | `404` page |
@@ -61,6 +63,34 @@ HTTP/3 responses now preserve an explicit `Content-Length` instead of always
 recomputing it from the transmitted body. That keeps `HEAD` consistent with the
 Hyper path.
 
+## Application override
+
+A PHP application can own its error representation — a custom `404.php`/`500.php`
+template, a REST/JSON error body, or its own graceful-degradation handler. Set
+this response header before emitting the error status:
+
+```php
+header('X-Larva-Error-Handling: app');
+http_response_code(404);
+// echo your own HTML/JSON body, or include a custom template
+```
+
+Accepted values (case-insensitive, trimmed) are `app`, `application`, `custom`,
+`preserve`, `keep`, `self`, `1`, `true`, `yes`. Any other value is ignored and the
+shared page is used.
+
+When an application opts out:
+
+- its status, headers and body are passed through unchanged;
+- the internal `X-Larva-Error-Handling` header is removed before the response
+  leaves LarvaPHP, so it never becomes a public API detail;
+- the opt-out applies to PHP-generated errors on HTTP/1.1, HTTP/2 and HTTP/3.
+
+Server-generated errors (missing static file, rate limit, payload too large,
+unregistered server, HTTP/3 worker failure, ACME miss) are produced before PHP
+runs and always use the shared page. They cannot be overridden by request
+headers.
+
 ## Copy selection
 
 Common codes have dedicated Vietnamese copy (`400`, `401`, `403`, `404`, `405`,
@@ -79,7 +109,8 @@ cargo test --lib -p larva-php --features embedded,http3,acme,mercure,tls
 
 The suite covers self-contained HTML output, client/server visual switching,
 HTML escaping, HEAD content length, stale-header removal, PHP status
-replacement, HTTP/3 static delivery, and concurrent request isolation.
+replacement, the application opt-out header, HTTP/3 static delivery, and
+concurrent request isolation.
 
 ## Rollback
 
