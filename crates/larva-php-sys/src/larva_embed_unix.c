@@ -12,6 +12,7 @@
 #include <php.h>
 #include <php_main.h>
 #include <SAPI.h>
+#include <zend_call_stack.h>
 #include <zend_stream.h>
 
 #include <stdio.h>
@@ -216,9 +217,23 @@ static int execute_script_internal(const char *script_path) {
     static int dummy_server_context;
     SG(server_context) = &dummy_server_context;
 
+    /* PHP's Zend stack guard is initialised once at module startup. Embedded
+     * PHP requests may run on a different thread (HTTP/3 workers use a 64 MiB
+     * stack), so the cached base/limit would be from another thread's stack and
+     * every script would fail with a false "Maximum call stack size reached".
+     * Recompute them for the current thread before each request. */
+#ifdef ZEND_CHECK_STACK_LIMIT
+    zend_call_stack_init();
+#endif
+
     if (php_request_startup() != SUCCESS) {
         return -1;
     }
+
+#ifdef ZEND_CHECK_STACK_LIMIT
+    /* Request activation must not keep a stale base from module startup. */
+    zend_call_stack_init();
+#endif
 
     /* The embedded SAPI is persistent: php_request_shutdown() does not always
      * clear SG(sapi_headers).http_response_code. A redirect from an earlier

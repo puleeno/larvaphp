@@ -848,6 +848,50 @@ mod tests {
         assert_eq!(parts.1, "/probe.php");
     }
 
+    #[cfg(all(feature = "http3", feature = "embedded"))]
+    #[test]
+    fn h3_worker_thread_does_not_inherit_php_stack_guard() {
+        use crate::runtime::executor::Request;
+
+        let dir = std::env::temp_dir().join(format!(
+            "larva-h3-php-stack-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let script = dir.join("stack-probe.php");
+        std::fs::write(&script, "<?php echo 'h3-stack-ok';").unwrap();
+        let script_path = script.to_string_lossy().to_string();
+
+        // Initialise PHP on this thread first, like a TCP request arriving
+        // before the first QUIC request does in production. A fixed stack
+        // limit cached at startup then made every H3 worker request fail.
+        crate::embed_php::execute_script(&script_path).unwrap();
+
+        let worker_script = script_path.clone();
+        let response = std::thread::Builder::new()
+            .stack_size(H3_WORKER_STACK_SIZE)
+            .spawn(move || {
+                crate::embed_php::execute_request(&Request {
+                    method: "GET".into(),
+                    uri: "/stack-probe.php".into(),
+                    headers: vec![("host".into(), "example.test".into())],
+                    body: Vec::new(),
+                    script_path: worker_script,
+                    server_name: "example.test".into(),
+                    server_port: "443".into(),
+                    script_name: "/stack-probe.php".into(),
+                })
+            })
+            .unwrap()
+            .join()
+            .unwrap()
+            .expect("embedded PHP must run on an H3-sized worker stack");
+
+        assert_eq!(String::from_utf8_lossy(&response.body), "h3-stack-ok");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[cfg(feature = "http3")]
     #[test]
     fn h3_request_returns_its_own_static_body() {
