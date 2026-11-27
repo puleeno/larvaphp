@@ -566,6 +566,17 @@ pub fn panel_html() -> String {
     </style>
 </head>
 <body x-data="larvaPanel()" x-init="init()" @keydown.escape.window="closeModal()" class="min-h-screen">
+<div x-cloak x-show="showLogin" class="fixed inset-0 z-50 flex items-center justify-center bg-gray-900">
+  <div class="bg-white rounded-lg p-8 w-96 shadow-xl">
+    <h2 class="text-xl font-bold mb-4">LarvaPHP Panel Login</h2>
+    <div class="space-y-3">
+      <input x-model="loginForm.username" class="w-full border px-3 py-2 rounded" placeholder="Username">
+      <input x-model="loginForm.password" type="password" class="w-full border px-3 py-2 rounded" placeholder="Password" @keydown.enter="doLogin()">
+      <button @click="doLogin()" class="w-full bg-indigo-600 text-white py-2 rounded">Login</button>
+      <p x-show="loginError" x-text="loginError" class="text-red-600 text-sm"></p>
+    </div>
+  </div>
+</div>
 
     <!-- Mobile overlay -->
     <div x-cloak x-show="sidebarOpen"
@@ -1341,6 +1352,10 @@ pub fn panel_html() -> String {
         document.addEventListener('alpine:init', () => {
             Alpine.data('larvaPanel', () => ({
                 currentPage: 'dashboard',
+                authToken: (localStorage.getItem('larva_token') || ''),
+                showLogin: false,
+                loginForm: { username: 'admin', password: 'admin' },
+                loginError: '',
                 sidebarOpen: false,
                 isRefreshing: false,
                 lastUpdated: '',
@@ -1399,6 +1414,8 @@ pub fn panel_html() -> String {
                 },
 
                 async init() {
+                    if (!this.authToken) { this.showLogin = true; return; }
+                    try { await this.api('/auth/me'); } catch (e) { this.authToken=''; localStorage.removeItem('larva_token'); this.showLogin=true; return; }
                     await this.refreshAll();
                     setInterval(() => this.fetchStats(), 15000);
                 },
@@ -1419,6 +1436,7 @@ pub fn panel_html() -> String {
 
                 async api(path, method = 'GET', body = null) {
                     const opts = { method, headers: { 'Content-Type': 'application/json' } };
+                    if (this.authToken) opts.headers['Authorization'] = 'Bearer ' + this.authToken;
                     if (body) opts.body = JSON.stringify(body);
                     const res = await fetch('/api' + path, opts);
                     const data = await res.json();
@@ -1435,6 +1453,19 @@ pub fn panel_html() -> String {
                     this.alertTimer = setTimeout(() => { this.alert = null; }, 4500);
                 },
 
+                async doLogin() {
+                    this.loginError = '';
+                    try {
+                        const res = await fetch('/api/auth/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(this.loginForm) });
+                        const data = await res.json();
+                        if (!res.ok || data.success === false) throw new Error(data.error || 'Login failed');
+                        this.authToken = data.data.token;
+                        localStorage.setItem('larva_token', this.authToken);
+                        this.showLogin = false;
+                        await this.refreshAll();
+                    } catch (e) { this.loginError = e.message; }
+                },
+                logout() { this.authToken=''; localStorage.removeItem('larva_token'); this.showLogin=true; },
                 async refreshAll() {
                     this.isRefreshing = true;
                     try {
