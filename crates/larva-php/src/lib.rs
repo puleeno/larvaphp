@@ -38,6 +38,7 @@ pub mod features;
 pub mod http3;
 pub mod listener;
 pub mod metrics;
+pub mod modules;
 pub mod options;
 pub mod path_resolver;
 pub mod phpinfo;
