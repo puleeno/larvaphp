@@ -125,6 +125,27 @@ impl PanelDb {
         ).map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?;
 
         conn.execute_batch(
+            // --- Role permissions (RBAC) ---
+            r#"
+            CREATE TABLE IF NOT EXISTS role_permissions (
+                role       TEXT NOT NULL,
+                permission TEXT NOT NULL,
+                PRIMARY KEY (role, permission)
+            );
+            "#,
+        ).map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?;
+
+        // Seed default permissions
+        let seeds = [
+            ("admin", "users.manage"), ("admin", "websites.manage"), ("admin", "settings.manage"), ("admin", "ssl.manage"),
+            ("user", "websites.view"), ("user", "websites.manage"),
+            ("viewer", "websites.view"),
+        ];
+        for (r, p) in seeds {
+            let _ = conn.execute("INSERT OR IGNORE INTO role_permissions (role, permission) VALUES (?1, ?2)", rusqlite::params![r, p]);
+        }
+
+        conn.execute_batch(
             // --- Audit log ---
             r#"
             CREATE TABLE IF NOT EXISTS audit_log (

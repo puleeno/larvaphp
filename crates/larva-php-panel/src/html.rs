@@ -1148,31 +1148,20 @@ pub fn panel_html() -> String {
                  x-transition:enter-start="opacity-0 translate-y-3"
                  x-transition:enter-end="opacity-100 translate-y-0"
                  class="space-y-5">
-                <div class="text-sm text-slate-500" x-text="users.length + ' user(s) - assign roles'"></div>
-                <div class="fancy-card">
-                    <div class="table-wrapper">
-                        <table>
-                            <thead>
-                                <tr><th>Username</th><th>Role</th><th>Change Role</th></tr>
-                            </thead>
-                            <tbody>
-                                <template x-for="user in users" :key="user.id">
-                                    <tr>
-                                        <td class="font-mono text-sm font-semibold text-slate-900" x-text="user.username"></td>
-                                        <td><span class="badge badge-primary" x-text="user.role"></span></td>
-                                        <td>
-                                            <select class="border rounded px-2 py-1 text-sm" :value="user.role" @change="api('/users/'+user.id+'/role','PUT',{role:$event.target.value}).then(()=>fetchUsers())">
-                                                <option value="admin">admin</option>
-                                                <option value="user">user</option>
-                                                <option value="viewer">viewer</option>
-                                            </select>
-                                        </td>
-                                    </tr>
-                                </template>
-                            </tbody>
-                        </table>
+                <div class="text-sm text-slate-500">Manage permissions per role</div>
+                <template x-for="(perms, role) in roles" :key="role">
+                    <div class="fancy-card p-4 mb-3">
+                        <h3 class="font-bold mb-2" x-text="role"></h3>
+                        <div class="flex flex-wrap gap-3">
+                            <template x-for="p in ['users.manage','websites.view','websites.manage','settings.manage','ssl.manage']" :key="p">
+                                <label class="flex items-center gap-1 text-sm">
+                                    <input type="checkbox" :checked="perms.includes(p)" @change="togglePerm(role,p)">
+                                    <span x-text="p"></span>
+                                </label>
+                            </template>
+                        </div>
                     </div>
-                </div>
+                </template>
             </div>
 
             <!-- Settings -->
@@ -1433,6 +1422,7 @@ pub fn panel_html() -> String {
                 workers: [],
                 files: [],
                 users: [],
+                roles: {},
                 fileDir: '/',
                 installerServices: [],
                 installerBusy: false,
@@ -1487,7 +1477,7 @@ pub fn panel_html() -> String {
                     else if (page === 'postgres') this.loadPostgresAccounts();
                     else if (page === 'ftp') this.loadFtpAccounts();
                     else if (page === 'users') this.fetchUsers();
-                    else if (page === 'permissions') this.fetchUsers();
+                    else if (page === 'permissions') this.fetchRoles();
                 },
 
                 async api(path, method = 'GET', body = null) {
@@ -1522,6 +1512,15 @@ pub fn panel_html() -> String {
                     } catch (e) { this.loginError = e.message; }
                 },
                 logout() { this.authToken=''; localStorage.removeItem('larva_token'); this.showLogin=true; },
+                async fetchRoles() {
+                    try { const d = await this.api('/roles'); this.roles = d.data; } catch(e) { this.alert = e.message; }
+                },
+                async togglePerm(role, perm) {
+                    const cur = this.roles[role] || [];
+                    const next = cur.includes(perm) ? cur.filter(p=>p!==perm) : [...cur, perm];
+                    this.roles[role] = next;
+                    await this.api('/roles/'+role+'/permissions','PUT',{permissions:next});
+                },
                 async refreshAll() {
                     this.isRefreshing = true;
                     try {

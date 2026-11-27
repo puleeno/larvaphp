@@ -106,6 +106,8 @@ impl PanelState {
             .route("/api/workers/{id}/stop", post(stop_worker))
             .route("/api/users", get(list_users).post(create_user))
             .route("/api/users/{id}/role", axum::routing::put(update_user_role))
+            .route("/api/roles", get(list_roles))
+            .route("/api/roles/{role}/permissions", axum::routing::put(update_role_permissions))
             .route("/api/files", get(list_files))
             .route("/api/settings", get(list_settings).put(update_setting))
             .route("/api/server/reload", post(reload_server))            .route("/api/auth/login", post(login))
@@ -571,6 +573,49 @@ async fn update_user_role(
     match result {
         Ok(_) => api_json("ok".to_string()),
         Err(e) => api_err(&format!("update role: {}", e)),
+    }
+}
+
+async fn list_roles(State(state): State<PanelState>) -> Json<ApiResponse<serde_json::Value>> {
+    let result: Result<_, rusqlite::Error> = (move || {
+        let conn = state.db.inner.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT DISTINCT role FROM role_permissions UNION SELECT DISTINCT role FROM users")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        let mut roles = Vec::new();
+        for row in rows { roles.push(row?); }
+        let mut out = serde_json::Map::new();
+        for role in &roles {
+            let mut pStmt = conn.prepare("SELECT permission FROM role_permissions WHERE role = ?1")?;
+            let perms: Vec<String> = pStmt.query_map([role], |r| r.get(0))?.filter_map(|r| r.ok()).collect();
+            out.insert(role.clone(), serde_json::json!(perms));
+        }
+        Ok(serde_json::Value::Object(out))
+    })();
+    match result {
+        Ok(v) => api_json(v),
+        Err(e) => api_err(&format!("list roles: {}", e)),
+    }
+}
+
+async fn update_role_permissions(
+    State(state): State<PanelState>,
+    Path(role): Path<String>,
+    Json(payload): Json<serde_json::Value>,
+) -> Json<ApiResponse<String>> {
+    let perms = payload.get("permissions").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    let result: Result<(), rusqlite::Error> = (move || {
+        let conn = state.db.inner.lock().unwrap();
+        conn.execute("DELETE FROM role_permissions WHERE role = ?1", rusqlite::params![role])?;
+        for p in perms {
+            if let Some(s) = p.as_str() {
+                conn.execute("INSERT OR IGNORE INTO role_permissions (role, permission) VALUES (?1, ?2)", rusqlite::params![role, s])?;
+            }
+        }
+        Ok(())
+    })();
+    match result {
+        Ok(_) => api_json("ok".to_string()),
+        Err(e) => api_err(&format!("update role perms: {}", e)),
     }
 }
 
