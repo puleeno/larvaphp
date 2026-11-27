@@ -6,8 +6,9 @@ use axum::{
     Router,
     routing::{get, post, delete},
     extract::{State, Query, Path},
-    response::{Html, Json},
-    http::{Method, header},
+    response::{Html, Json, IntoResponse},
+    http::{Method, header, StatusCode, Request},
+    middleware,
 };
 use tower_http::cors::CorsLayer;
 use serde::Deserialize;
@@ -88,6 +89,7 @@ impl PanelState {
     }
 
     pub fn router(self) -> Router {
+        let state = self.clone();
         Router::new()
             .route("/api/stats", get(stats_handler))
             .route("/api/websites", get(list_websites).post(create_website))
@@ -107,8 +109,9 @@ impl PanelState {
             .route("/api/settings", get(list_settings).put(update_setting))
             .route("/api/server/reload", post(reload_server))            .route("/api/auth/login", post(login))
             .route("/api/auth/me", get(me))
+            .route_layer(middleware::from_fn_with_state(state.clone(), auth_middleware))
             .fallback(spa_fallback)
-            .with_state(self)
+            .with_state(state)
             .layer(
                 CorsLayer::new()
                     .allow_origin(tower_http::cors::Any)
@@ -660,6 +663,39 @@ async fn reload_server(State(state): State<PanelState>) -> Json<ApiResponse<Stri
 // ============================================================================
 // SPA Fallback
 // ============================================================================
+
+
+async fn auth_middleware(
+    State(state): State<PanelState>,
+    req: Request<axum::body::Body>,
+    next: middleware::Next,
+) -> axum::response::Response {
+    if req.method() == Method::OPTIONS {
+        return next.run(req).await;
+    }
+    if req.uri().path() == "/api/auth/login" {
+        return next.run(req).await;
+    }
+    let token = req
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|h| h.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer "))
+        .unwrap_or("");
+    let valid = (move || {
+        let conn = state.db.inner.lock().unwrap();
+        conn.query_row(
+            "SELECT 1 FROM sessions WHERE token = ?1 AND expires_at > datetime('now')",
+            rusqlite::params![token],
+            |_| Ok(()),
+        )
+        .is_ok()
+    })();
+    if !valid {
+        return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
+    }
+    next.run(req).await
+}
 
 async fn spa_fallback() -> Html<String> {
     Html(crate::html::panel_html())
