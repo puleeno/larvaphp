@@ -641,12 +641,20 @@ pub fn panel_html() -> String {
             <button @click="navigate('files')" class="nav-btn" :class="{ 'nav-item-active': currentPage === 'files' }">
                 <i class="fa fa-folder"></i> <span>File Manager</span>
             </button>
-            <button @click="navigate('mysql')" class="nav-btn" :class="{ 'nav-item-active': currentPage === 'mysql' }">
-                <i class="fa fa-database"></i> <span>MySQL Accounts</span>
-            </button>
-            <button @click="navigate('postgres')" class="nav-btn" :class="{ 'nav-item-active': currentPage === 'postgres' }">
-                <i class="fa fa-database"></i> <span>PostgreSQL Accounts</span>
-            </button>
+            <div>
+                <button @click="dbOpen = !dbOpen" class="nav-btn w-full flex items-center justify-between">
+                    <span><i class="fa fa-database"></i> Databases</span>
+                    <i class="fa" :class="dbOpen ? 'fa-chevron-down' : 'fa-chevron-right'"></i>
+                </button>
+                <div x-show="dbOpen" x-transition class="pl-4 space-y-1 mt-1">
+                    <button @click="navigate('mysql')" class="nav-btn" :class="{ 'nav-item-active': currentPage === 'mysql' }">
+                        <i class="fa fa-database"></i> <span>MySQL</span>
+                    </button>
+                    <button @click="navigate('postgres')" class="nav-btn" :class="{ 'nav-item-active': currentPage === 'postgres' }">
+                        <i class="fa fa-database"></i> <span>PostgreSQL</span>
+                    </button>
+                </div>
+            </div>
             <button @click="navigate('ftp')" class="nav-btn" :class="{ 'nav-item-active': currentPage === 'ftp' }">
                 <i class="fa fa-folder-open"></i> <span>FTP Accounts</span>
             </button>
@@ -1394,6 +1402,7 @@ pub fn panel_html() -> String {
         document.addEventListener('alpine:init', () => {
             Alpine.data('larvaPanel', () => ({
                 currentPage: 'dashboard',
+                dbOpen: false,
                 usersOpen: false,
                 systemOpen: false,
                 authToken: (localStorage.getItem('larva_token') || ''),
