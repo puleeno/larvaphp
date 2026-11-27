@@ -641,9 +641,6 @@ pub fn panel_html() -> String {
             <button @click="navigate('files')" class="nav-btn" :class="{ 'nav-item-active': currentPage === 'files' }">
                 <i class="fa fa-folder"></i> <span>File Manager</span>
             </button>
-            <button @click="navigate('installer')" class="nav-btn" :class="{ 'nav-item-active': currentPage === 'installer' }">
-                <i class="fa fa-download"></i> <span>Installer</span>
-            </button>
             <button @click="navigate('mysql')" class="nav-btn" :class="{ 'nav-item-active': currentPage === 'mysql' }">
                 <i class="fa fa-database"></i> <span>MySQL Accounts</span>
             </button>
