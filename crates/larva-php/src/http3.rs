@@ -77,6 +77,50 @@ pub mod imp {
         headers: Vec<(String, String)>,
     }
 
+    /// Convert HTTP/3 header blocks into the `(method, path, headers)` tuple
+    /// consumed by `Server::handle_request_parts`.
+    ///
+    /// Browsers normally send `:authority` but no `host` field. The TCP path
+    /// gets that mapping from Hyper for free; the QUIC path must do it here,
+    /// otherwise PHP sees `SERVER_NAME=localhost` and WordPress can enter a
+    /// redirect/bootstrap loop that surfaces as a 500.
+    pub(crate) fn h3_request_parts(
+        headers: &[h3::Header],
+    ) -> (String, String, Vec<(String, String)>) {
+        let mut method = String::from("GET");
+        let mut path = String::from("/");
+        let mut authority = String::new();
+        let mut req_headers: Vec<(String, String)> = Vec::new();
+
+        for h in headers {
+            match h.name() {
+                b":method" => method = String::from_utf8_lossy(h.value()).to_string(),
+                b":path" => path = String::from_utf8_lossy(h.value()).to_string(),
+                b":authority" => {
+                    authority = String::from_utf8_lossy(h.value()).to_string();
+                }
+                b":scheme" | b":status" => {}
+                name => {
+                    req_headers.push((
+                        String::from_utf8_lossy(name).to_string(),
+                        String::from_utf8_lossy(h.value()).to_string(),
+                    ));
+                }
+            }
+        }
+
+        // Explicit `host` wins; otherwise synthesise it from `:authority`.
+        if !authority.is_empty()
+            && !req_headers
+                .iter()
+                .any(|(name, _)| name.eq_ignore_ascii_case("host"))
+        {
+            req_headers.push(("host".to_string(), authority));
+        }
+
+        (method, path, req_headers)
+    }
+
     /// A finished request waiting to be written by the listener thread.
     struct CompletedRequest {
         client_key: Vec<u8>,
@@ -464,22 +508,7 @@ pub mod imp {
         // Stop reading the request stream; we decide the response from headers.
         let _ = conn.stream_shutdown(stream_id, quiche::Shutdown::Read, 0);
 
-        let mut method = String::from("GET");
-        let mut path = String::from("/");
-        let mut req_headers: Vec<(String, String)> = Vec::new();
-        for h in headers {
-            match h.name() {
-                b":method" => method = String::from_utf8_lossy(h.value()).to_string(),
-                b":path" => path = String::from_utf8_lossy(h.value()).to_string(),
-                b":authority" | b":scheme" | b":status" => {}
-                name => {
-                    req_headers.push((
-                        String::from_utf8_lossy(name).to_string(),
-                        String::from_utf8_lossy(h.value()).to_string(),
-                    ));
-                }
-            }
-        }
+        let (method, path, req_headers) = h3_request_parts(headers);
 
         let job = PendingRequest {
             client_key: client_key.to_vec(),
@@ -676,6 +705,12 @@ pub use imp::*;
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "http3")]
+    use super::imp::h3_request_parts;
+    #[cfg(feature = "http3")]
+    use quiche::h3;
+    #[cfg(feature = "http3")]
+    use quiche::h3::NameValue;
     use crate::server::Server;
     use std::sync::Arc;
 
@@ -741,6 +776,46 @@ mod tests {
             test_server(),
         );
         assert!(h3.run().is_err());
+    }
+
+    #[cfg(feature = "http3")]
+    #[test]
+    fn h3_request_parts_maps_authority_to_host() {
+        let headers = vec![
+            h3::Header::new(b":method", b"GET"),
+            h3::Header::new(b":scheme", b"https"),
+            h3::Header::new(b":authority", b"nghesachxua.vn"),
+            h3::Header::new(b":path", b"/"),
+            h3::Header::new(b"user-agent", b"Waterfox"),
+        ];
+
+        let (method, path, headers) = h3_request_parts(&headers);
+        assert_eq!(method, "GET");
+        assert_eq!(path, "/");
+        assert!(headers
+            .iter()
+            .any(|(name, value)| name == "host" && value == "nghesachxua.vn"));
+        assert!(headers
+            .iter()
+            .any(|(name, value)| name == "user-agent" && value == "Waterfox"));
+    }
+
+    #[cfg(feature = "http3")]
+    #[test]
+    fn h3_request_parts_keeps_explicit_host() {
+        let headers = vec![
+            h3::Header::new(b":method", b"GET"),
+            h3::Header::new(b":authority", b"ignored.example"),
+            h3::Header::new(b":path", b"/"),
+            h3::Header::new(b"host", b"nghesachxua.vn"),
+        ];
+
+        let (_, _, headers) = h3_request_parts(&headers);
+        let hosts: Vec<&String> = headers
+            .iter()
+            .filter_map(|(name, value)| name.eq_ignore_ascii_case("host").then_some(value))
+            .collect();
+        assert_eq!(hosts, vec![&"nghesachxua.vn".to_string()]);
     }
 
     #[cfg(feature = "http3")]
