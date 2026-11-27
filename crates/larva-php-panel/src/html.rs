@@ -1468,14 +1468,18 @@ pub fn panel_html() -> String {
                 },
 
                 async init() {
+                    const h = (location.hash || '').replace('#/','');
+                    if (h) this.currentPage = h;
                     if (!this.authToken) { this.showLogin = true; return; }
                     try { await this.api('/auth/me'); } catch (e) { this.authToken=''; localStorage.removeItem('larva_token'); this.showLogin=true; return; }
                     await this.refreshAll();
                     setInterval(() => this.fetchStats(), 15000);
+                    window.addEventListener('hashchange', () => { const h=(location.hash||'').replace('#/',''); if(h) this.currentPage=h; });
                 },
 
                 navigate(page) {
                     this.currentPage = page;
+                    location.hash = '#/'+page;
                     this.sidebarOpen = false;
                     if (page === 'websites') this.fetchWebsites();
                     else if (page === 'ssl') this.fetchSsl();
