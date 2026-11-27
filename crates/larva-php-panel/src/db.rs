@@ -150,7 +150,7 @@ impl PanelDb {
                 rusqlite::params![
                     uuid::Uuid::new_v4().to_string(),
                     "admin",
-                    "$2y$12$LQv3c1yqBWVHxkd0LHAkCOYz6TtxMQJqhN8/LewdBPj4J/HS.iK8O", // "admin" bcrypt
+                    "admin",
                     "admin",
                     "admin@localhost",
                 ],
