@@ -1437,6 +1437,9 @@ pub fn panel_html() -> String {
         document.addEventListener('alpine:init', () => {
             Alpine.data('larvaPanel', () => ({
                 currentPage: 'dashboard',
+                showEditFile: false,
+                editFilePath: '',
+                editContent: '',
                 dbOpen: false,
                 usersOpen: false,
                 systemOpen: false,
@@ -1807,8 +1810,17 @@ pub fn panel_html() -> String {
 
                 async inspectFile(path) {
                     try {
-                        const res = await this.api('/files?path=' + encodeURIComponent(path));
-                        this.showAlert(res.data?.content || `Loaded ${path}`, 'info');
+                        const res = await this.api('/files/content?path=' + encodeURIComponent(path));
+                        this.editFilePath = path;
+                        this.editContent = res.data || '';
+                        this.showEditFile = true;
+                    } catch (e) { this.showAlert(e.message, 'error'); }
+                },
+                async saveEditFile() {
+                    try {
+                        await this.api('/files/content','PUT',{path:this.editFilePath, content:this.editContent});
+                        this.showEditFile = false;
+                        this.showAlert('Saved', 'success');
                     } catch (e) { this.showAlert(e.message, 'error'); }
                 },
 
@@ -1844,6 +1856,16 @@ pub fn panel_html() -> String {
             }));
         });
     </script>
+<div x-cloak x-show="showEditFile" class="fixed inset-0 z-50 flex items-center justify-center bg-gray-900/50">
+  <div class="bg-white rounded-lg p-4 w-[800px] max-w-[95vw] shadow-xl">
+    <h2 class="text-lg font-bold mb-2" x-text="'Edit: ' + editFilePath"></h2>
+    <textarea x-model="editContent" class="w-full border rounded p-2 font-mono text-sm" rows="20"></textarea>
+    <div class="flex justify-end gap-2 mt-3">
+      <button @click="showEditFile=false" class="btn-text px-4 py-2">Cancel</button>
+      <button @click="saveEditFile()" class="btn-primary px-4 py-2">Save</button>
+    </div>
+  </div>
+</div>
 </body>
 </html>"##
     .to_string()

@@ -109,6 +109,7 @@ impl PanelState {
             .route("/api/roles", get(list_roles))
             .route("/api/roles/{role}/permissions", axum::routing::put(update_role_permissions))
             .route("/api/files", get(list_files))
+            .route("/api/files/content", get(read_file).put(write_file))
             .route("/api/settings", get(list_settings).put(update_setting))
             .route("/api/listeners", get(list_listeners).post(create_listener))
             .route("/api/listeners/{id}", delete(delete_listener))
@@ -670,6 +671,23 @@ async fn delete_listener(State(state): State<PanelState>, Path(id): Path<String>
     match result {
         Ok(_) => api_json("ok".to_string()),
         Err(e) => api_err(&format!("delete listener: {}", e)),
+    }
+}
+
+async fn read_file(Query(query): Query<FileQuery>) -> Json<ApiResponse<String>> {
+    let path = query.path.unwrap_or_default();
+    match std::fs::read_to_string(&path) {
+        Ok(c) => api_json(c),
+        Err(e) => api_err(&format!("read file: {}", e)),
+    }
+}
+
+async fn write_file(Json(payload): Json<serde_json::Value>) -> Json<ApiResponse<String>> {
+    let path = payload.get("path").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let content = payload.get("content").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    match std::fs::write(&path, content) {
+        Ok(_) => api_json("saved".to_string()),
+        Err(e) => api_err(&format!("write file: {}", e)),
     }
 }
 
