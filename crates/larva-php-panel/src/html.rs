@@ -648,10 +648,10 @@ pub fn panel_html() -> String {
                 </button>
                 <div x-show="dbOpen" x-transition class="pl-4 space-y-1 mt-1">
                     <button @click="navigate('mysql')" class="nav-btn" :class="{ 'nav-item-active': currentPage === 'mysql' }">
-                        <i class="fa fa-database"></i> <span>MySQL</span>
+                        <i class="fa fa-server" style="color:#00758f"></i> <span>MySQL</span>
                     </button>
                     <button @click="navigate('postgres')" class="nav-btn" :class="{ 'nav-item-active': currentPage === 'postgres' }">
-                        <i class="fa fa-database"></i> <span>PostgreSQL</span>
+                        <i class="fa fa-database" style="color:#336791"></i> <span>PostgreSQL</span>
                     </button>
                 </div>
             </div>
