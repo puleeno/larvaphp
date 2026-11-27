@@ -653,9 +653,20 @@ pub fn panel_html() -> String {
             <button @click="navigate('users')" class="nav-btn" :class="{ 'nav-item-active': currentPage === 'users' }">
                 <i class="fa fa-users"></i> <span>Users</span>
             </button>
-            <button @click="navigate('settings')" class="nav-btn" :class="{ 'nav-item-active': currentPage === 'settings' }">
-                <i class="fa fa-sliders-h"></i> <span>Settings</span>
-            </button>
+            <div>
+                <button @click="systemOpen = !systemOpen" class="nav-btn w-full flex items-center justify-between">
+                    <span><i class="fa fa-cog"></i> System</span>
+                    <i class="fa" :class="systemOpen ? 'fa-chevron-down' : 'fa-chevron-right'"></i>
+                </button>
+                <div x-show="systemOpen" x-transition class="pl-4 space-y-1 mt-1">
+                    <button @click="navigate('settings')" class="nav-btn" :class="{ 'nav-item-active': currentPage === 'settings' }">
+                        <i class="fa fa-sliders-h"></i> <span>Settings</span>
+                    </button>
+                    <button @click="navigate('installer')" class="nav-btn" :class="{ 'nav-item-active': currentPage === 'installer' }">
+                        <i class="fa fa-download"></i> <span>Thirdparty</span>
+                    </button>
+                </div>
+            </div>
         </nav>
 
         <div class="mt-auto p-3.5 border-t border-slate-100 shrink-0">
@@ -1349,6 +1360,7 @@ pub fn panel_html() -> String {
         document.addEventListener('alpine:init', () => {
             Alpine.data('larvaPanel', () => ({
                 currentPage: 'dashboard',
+                systemOpen: false,
                 authToken: (localStorage.getItem('larva_token') || ''),
                 showLogin: false,
                 loginForm: { username: 'admin', password: 'admin' },
