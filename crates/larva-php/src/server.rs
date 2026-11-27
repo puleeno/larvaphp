@@ -619,11 +619,13 @@ impl Server {
             return Ok(resp);
         }
 
-        if is_error_status(status_code) {
+        let app_handles_error = app_handles_error(&headers);
+        if is_error_status(status_code) && !app_handles_error {
             let (headers, body) =
                 error_page_parts(status_code, ctx.request_method.as_str(), headers);
             return Ok(build_response(status_code, headers, Bytes::from(body)));
         }
+        let headers = strip_app_error_header(headers);
 
         let mut builder = Response::builder()
             .status(status_code)
@@ -773,6 +775,7 @@ impl Server {
                     ];
                     for (n, v) in &headers {
                         if !n.eq_ignore_ascii_case("x-sendfile")
+                            && !n.eq_ignore_ascii_case(APP_ERROR_HEADER)
                             && !n.eq_ignore_ascii_case("content-length")
                             && !n.eq_ignore_ascii_case("content-type")
                         {
@@ -1410,7 +1413,8 @@ impl Server {
                                             );
                                         }
 
-                                        if is_error_status(status_code) {
+                                        let app_handles_error = app_handles_error(&headers);
+                                        if is_error_status(status_code) && !app_handles_error {
                                             let (headers, body) = error_page_parts(
                                                 status_code,
                                                 request_method.as_str(),
@@ -1424,6 +1428,7 @@ impl Server {
                                                 ),
                                             );
                                         }
+                                        let headers = strip_app_error_header(headers);
 
                                         let mut builder =
                                             Response::builder()
@@ -2014,6 +2019,7 @@ fn try_x_sendfile(
 
     for (name, value) in headers {
         if name.eq_ignore_ascii_case("x-sendfile")
+            || name.eq_ignore_ascii_case(APP_ERROR_HEADER)
             || name.eq_ignore_ascii_case("content-length")
             || name.eq_ignore_ascii_case("content-type")
         {
@@ -2260,6 +2266,34 @@ fn is_error_status(status: StatusCode) -> bool {
     status.is_client_error() || status.is_server_error()
 }
 
+/// Response header a PHP application can emit to keep its own 40x/50x body.
+///
+/// This is an internal signal from CGI output, never read from the request, so
+/// a client cannot opt out on the application's behalf.
+const APP_ERROR_HEADER: &str = "x-larva-error-handling";
+
+fn app_handles_error(headers: &[(String, String)]) -> bool {
+    headers.iter().any(|(name, value)| {
+        if !name.eq_ignore_ascii_case(APP_ERROR_HEADER) {
+            return false;
+        }
+        let value = value.trim().to_ascii_lowercase();
+        matches!(
+            value.as_str(),
+            "app" | "application" | "custom" | "preserve" | "keep" | "self" | "1" | "true"
+                | "yes"
+        )
+    })
+}
+
+/// Remove the internal opt-out signal before the response leaves LarvaPHP.
+fn strip_app_error_header(headers: Vec<(String, String)>) -> Vec<(String, String)> {
+    headers
+        .into_iter()
+        .filter(|(name, _)| !name.eq_ignore_ascii_case(APP_ERROR_HEADER))
+        .collect()
+}
+
 /// Headers that describe the *old* representation and must not survive when
 /// the body is replaced by the shared error page.
 fn is_replaced_representation_header(name: &str) -> bool {
@@ -2302,7 +2336,9 @@ fn error_page_parts(
     }
 
     for (name, value) in extra_headers {
-        if is_replaced_representation_header(&name) {
+        if name.eq_ignore_ascii_case(APP_ERROR_HEADER)
+            || is_replaced_representation_header(&name)
+        {
             continue;
         }
         if headers.iter().any(|(existing, _)| existing.eq_ignore_ascii_case(&name)) {
@@ -2322,10 +2358,15 @@ fn maybe_error_page_parts(
     headers: Vec<(String, String)>,
     body: Vec<u8>,
 ) -> (Vec<(String, String)>, Vec<u8>) {
+    // The application may own its error representation (custom template, REST
+    // error body, graceful degradation handler, ...). Honour that explicitly.
+    if app_handles_error(&headers) {
+        return (strip_app_error_header(headers), body);
+    }
     if is_error_status(status) {
         error_page_parts(status, method, headers)
     } else {
-        (headers, body)
+        (strip_app_error_header(headers), body)
     }
 }
 
@@ -3703,6 +3744,66 @@ mod tests {
         assert!(headers
             .iter()
             .any(|(name, value)| name == "content-type" && value == "text/plain"));
+    }
+
+    #[test]
+    fn app_error_handling_header_preserves_php_error_body() {
+        let headers = vec![
+            ("content-type".to_string(), "text/html; charset=UTF-8".to_string()),
+            (
+                APP_ERROR_HEADER.to_string(),
+                "app".to_string(),
+            ),
+            ("x-request-id".to_string(), "req-42".to_string()),
+        ];
+
+        let (headers, body) = maybe_error_page_parts(
+            StatusCode::NOT_FOUND,
+            "GET",
+            headers,
+            b"<main>custom 404 template</main>".to_vec(),
+        );
+
+        assert_eq!(body, b"<main>custom 404 template</main>");
+        assert!(!headers
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case(APP_ERROR_HEADER)));
+        assert!(headers
+            .iter()
+            .any(|(name, value)| name == "content-type"
+                && value == "text/html; charset=UTF-8"));
+        assert!(headers
+            .iter()
+            .any(|(name, value)| name == "x-request-id" && value == "req-42"));
+    }
+
+    #[test]
+    fn app_error_handling_header_recognised_values_and_stripped_on_success() {
+        for value in ["app", "APPLICATION", " preserve ", "1", "true", "yes"] {
+            let headers = vec![(APP_ERROR_HEADER.to_string(), value.to_string())];
+            assert!(app_handles_error(&headers), "value {:?} should opt out", value);
+
+            let (headers, _) = maybe_error_page_parts(
+                StatusCode::OK,
+                "GET",
+                headers,
+                b"ok".to_vec(),
+            );
+            assert!(headers.is_empty(), "internal header must never leak");
+        }
+
+        let ignored = vec![(APP_ERROR_HEADER.to_string(), "server".to_string())];
+        assert!(!app_handles_error(&ignored));
+        let (headers, body) = maybe_error_page_parts(
+            StatusCode::NOT_FOUND,
+            "GET",
+            ignored,
+            b"plain".to_vec(),
+        );
+        assert!(String::from_utf8_lossy(&body).contains("<style>"));
+        assert!(!headers
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case(APP_ERROR_HEADER)));
     }
 
     // === Connection / state isolation ===
