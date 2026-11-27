@@ -140,6 +140,11 @@ impl IniEntriesResolver {
         entries.push_str("opcache.max_accelerated_files=100000\n");
         entries.push_str("opcache.save_comments=1\n");
         entries.push_str("opcache.fast_shutdown=1\n");
+        // PHP 8.3's embedded SAPI otherwise auto-detects a 2 MiB compiler
+        // stack, which aborts even trivial scripts on dedicated HTTP/3 worker
+        // threads. Use the normal 8 MiB process stack limit; the H3 workers
+        // themselves have a larger 64 MiB stack.
+        entries.push_str("zend.max_allowed_stack_size=8M\n");
         entries
     }
 }
@@ -209,6 +214,12 @@ mod tests {
         assert!(entries.contains("opcache.enable=1"));
         assert!(entries.contains("opcache.file_cache="));
         assert!(entries.contains("opcache.validate_timestamps=0"));
+    }
+
+    #[test]
+    fn entries_raise_php_compiler_stack_limit() {
+        let entries = IniEntriesResolver::entries();
+        assert!(entries.contains("zend.max_allowed_stack_size=8M"));
     }
 
     #[test]
