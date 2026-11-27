@@ -25,6 +25,8 @@ pub struct PanelState {
     pub db: PanelDb,
     /// Optional hot-reload callback into the live server's vhost router.
     pub reloader: Option<std::sync::Arc<dyn crate::VHostReloader>>,
+    /// Optional worker status provider.
+    pub worker_provider: Option<std::sync::Arc<dyn crate::WorkerProvider>>,
 }
 
 /// Query params for file listing.
@@ -35,8 +37,8 @@ pub struct FileQuery {
 }
 
 impl PanelState {
-    pub fn new(db: PanelDb, reloader: Option<std::sync::Arc<dyn crate::VHostReloader>>) -> Self {
-        Self { db, reloader }
+    pub fn new(db: PanelDb, reloader: Option<std::sync::Arc<dyn crate::VHostReloader>>, worker_provider: Option<std::sync::Arc<dyn crate::WorkerProvider>>) -> Self {
+        Self { db, reloader, worker_provider }
     }
 
     /// Rebuild the live vhost routing table from the current website list.
@@ -480,9 +482,13 @@ async fn renew_ssl_cert(
 }
 
 async fn list_workers(
-    State(_state): State<PanelState>,
+    State(state): State<PanelState>,
 ) -> Json<ApiResponse<Vec<WorkerStatus>>> {
-    api_json(vec![])
+    if let Some(wp) = state.worker_provider {
+        api_json(wp.list_workers())
+    } else {
+        api_json(vec![])
+    }
 }
 
 async fn restart_worker(

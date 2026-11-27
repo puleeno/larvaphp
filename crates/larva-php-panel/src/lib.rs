@@ -23,6 +23,11 @@ pub trait VHostReloader: Send + Sync {
     fn reload(&self, websites: Vec<api::Website>);
 }
 
+/// Provides worker status to the panel.
+pub trait WorkerProvider: Send + Sync {
+    fn list_workers(&self) -> Vec<api::WorkerStatus>;
+}
+
 /// Start the panel server on the given address (no hot-reload callback).
 pub async fn start(addr: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     start_with_reloader(addr, None).await
@@ -33,9 +38,17 @@ pub async fn start_with_reloader(
     addr: &str,
     reloader: Option<Arc<dyn VHostReloader>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    start_with_reloader_and_workers(addr, reloader, None).await
+}
+
+pub async fn start_with_reloader_and_workers(
+    addr: &str,
+    reloader: Option<Arc<dyn VHostReloader>>,
+    worker_provider: Option<Arc<dyn WorkerProvider>>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let socket_addr = addr.parse()?;
     let db = PanelDb::open(&std::path::PathBuf::from("larva-panel.db"))?;
-    let state = PanelState::new(db, reloader);
+    let state = PanelState::new(db, reloader, worker_provider);
     state.run(socket_addr).await?;
     Ok(())
 }
