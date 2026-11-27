@@ -105,6 +105,7 @@ impl PanelState {
             .route("/api/workers/{id}/restart", post(restart_worker))
             .route("/api/workers/{id}/stop", post(stop_worker))
             .route("/api/users", get(list_users).post(create_user))
+            .route("/api/users/{id}/role", axum::routing::put(update_user_role))
             .route("/api/files", get(list_files))
             .route("/api/settings", get(list_settings).put(update_setting))
             .route("/api/server/reload", post(reload_server))            .route("/api/auth/login", post(login))
@@ -553,6 +554,23 @@ async fn create_user(
     match result {
         Ok(u) => api_json(u),
         Err(e) => api_err(&format!("create user: {}", e)),
+    }
+}
+
+async fn update_user_role(
+    State(state): State<PanelState>,
+    Path(id): Path<String>,
+    Json(payload): Json<serde_json::Value>,
+) -> Json<ApiResponse<String>> {
+    let role = payload.get("role").and_then(|v| v.as_str()).unwrap_or("viewer").to_string();
+    let result: Result<(), rusqlite::Error> = (move || {
+        let conn = state.db.inner.lock().unwrap();
+        conn.execute("UPDATE users SET role = ?1 WHERE id = ?2", rusqlite::params![role, id])?;
+        Ok(())
+    })();
+    match result {
+        Ok(_) => api_json("ok".to_string()),
+        Err(e) => api_err(&format!("update role: {}", e)),
     }
 }
 
