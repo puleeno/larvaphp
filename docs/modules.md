@@ -48,3 +48,21 @@ Loaded via `larva_php::modules::lua::load_lua_module(path)`.
 - Disable module loading in production unless explicitly configured.
 - Audit all module code; modules can read/write filesystem and network.
 - Use role-based access to the panel's module management endpoints.
+
+
+## Lua SDK Reference
+
+Modules interact only through the `larva` global (sandboxed — no `io`/`os`/`debug`):
+
+- `larva.route(method, path, handler)` — register HTTP route. Handler receives
+  `req` table `{method, path, body}` and returns `{status, body, headers}`.
+- `larva.on_request(handler)` / `larva.on_response(handler)` — hooks.
+- `larva.panel_page(slug, title)` — register a panel page.
+- `larva.crypto.b64encode(s)` / `b64decode(s)` — base64.
+- `larva.template.render(tpl, vars)` — `{{key}}` substitution.
+- Multi-file modules: directory of `.lua` files, `init.lua` loaded first, `require()` available.
+
+## WASM SDK
+
+WASM modules use host functions provided by LarvaPHP (same concept set) instead
+of direct OS access. Loader is a stub pending implementation.
