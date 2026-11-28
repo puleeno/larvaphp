@@ -2,6 +2,22 @@
 
 ## Overview
 
+## Architecture Diagram
+
+```mermaid
+flowchart TD
+    A[HTTP Request] --> B{Router}
+    B --> C[Lua Module Routes]
+    B --> D[WASM Module Routes]
+    B --> E[PHP VHost Handler]
+    C --> F[LuaJIT Runtime]
+    D --> G[WASM Sandbox]
+    F --> H[Response]
+    G --> H
+    E --> H
+```
+
+
 LarvaPHP v2 supports two native module forms:
 
 1. **Lua modules** (embedded LuaJIT via `mlua`) — flexible, can intervene at
