@@ -26,6 +26,25 @@ static ROUTES: once_cell::sync::Lazy<Mutex<Vec<LuaRoute>>> =
     once_cell::sync::Lazy::new(|| Mutex::new(Vec::new()));
 
 #[cfg(feature = "lua")]
+#[derive(Clone)]
+pub enum HookKind { Request, Response }
+
+#[cfg(feature = "lua")]
+#[derive(Clone)]
+pub struct LuaHook {
+    pub kind: HookKind,
+    pub handler: Arc<Mutex<LuaFunction>>,
+    pub lua: Arc<Mutex<Lua>>,
+}
+
+#[cfg(feature = "lua")]
+static HOOKS: once_cell::sync::Lazy<Mutex<Vec<LuaHook>>> =
+    once_cell::sync::Lazy::new(|| Mutex::new(Vec::new()));
+
+#[cfg(feature = "lua")]
+pub fn hooks() -> Vec<LuaHook> { HOOKS.lock().unwrap().clone() }
+
+#[cfg(feature = "lua")]
 pub fn routes() -> Vec<LuaRoute> {
     ROUTES.lock().unwrap().clone()
 }
@@ -47,6 +66,16 @@ pub fn load_lua_module(path: &str) -> Result<(), String> {
         })
         .map_err(|e| e.to_string())?;
     larva.set("route", register).map_err(|e| e.to_string())?;
+    let on_request = lua.create_function(|lua, func: LuaFunction| {
+        HOOKS.lock().unwrap().push(LuaHook { kind: HookKind::Request, handler: Arc::new(Mutex::new(func)), lua: Arc::new(Mutex::new(lua.clone())) });
+        Ok(())
+    }).map_err(|e| e.to_string())?;
+    let on_response = lua.create_function(|lua, func: LuaFunction| {
+        HOOKS.lock().unwrap().push(LuaHook { kind: HookKind::Response, handler: Arc::new(Mutex::new(func)), lua: Arc::new(Mutex::new(lua.clone())) });
+        Ok(())
+    }).map_err(|e| e.to_string())?;
+    larva.set("on_request", on_request).map_err(|e| e.to_string())?;
+    larva.set("on_response", on_response).map_err(|e| e.to_string())?;
     lua.globals().set("larva", larva).map_err(|e| e.to_string())?;
     lua.load(std::fs::read_to_string(path).map_err(|e| e.to_string())?)
         .exec()
