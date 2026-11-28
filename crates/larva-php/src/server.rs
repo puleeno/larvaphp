@@ -1324,38 +1324,6 @@ impl Server {
                                     }
                                 }
 
-                                // Lua module routes (standalone API services, no PHP).
-                                #[cfg(feature = "lua")]
-                                {
-                                    use crate::modules::lua;
-                                    let m = req.method().as_str().to_uppercase();
-                                    let pth = req.uri().path().to_string();
-                                    for route in lua::routes() {
-                                        if route.method == m && route.path == pth {
-                                            let lua = route.lua.lock().unwrap();
-                                            let handler = route.handler.lock().unwrap();
-                                            let resp = handler.call::<mlua::Value>(mlua::Value::Nil).unwrap_or(mlua::Value::Nil);
-                                            let mut status = 200u16;
-                                            let mut body = String::new();
-                                            if let Some(t) = resp.as_table() {
-                                                if let Ok(v) = t.get::<mlua::Value>("status") { if let Some(i) = v.as_integer() { status = i as u16; } }
-                                                if let Ok(v) = t.get::<String>("body") { body = v; }
-                                            }
-                                            drop(handler);
-                                            drop(lua);
-                                            let sc = StatusCode::from_u16(status).unwrap_or(StatusCode::OK);
-                                            return Ok::<Response<Full<Bytes>>, hyper::Error>(
-                                                Response::builder()
-                                                    .status(sc)
-                                                    .header("content-type", "text/html; charset=UTF-8")
-                                                    .header("server", "LarvaPHP")
-                                                    .body(Full::new(Bytes::from(body)))
-                                                    .unwrap(),
-                                            );
-                                        }
-                                    }
-                                }
-
                                 // Worker request matching (Strategy: first matcher wins).
                                 // If a worker matches, route to its script (front controller).
                                 let mut worker_script: Option<String> = None;
@@ -1443,6 +1411,53 @@ impl Server {
                 resolve_index_php_static(&uri, &root)
             }
         };
+
+        // Lua module routes (standalone API services, no PHP) — checked
+        // before script resolution so non-PHP paths are served.
+        #[cfg(feature = "lua")]
+        {
+            use crate::modules::lua;
+            let m = req.method().as_str().to_uppercase();
+            let pth = uri.split('?').next().unwrap_or("").to_string();
+            for route in lua::routes() {
+                if route.method == m && route.path == pth {
+                    // drain body
+                    let mut body_bytes = Vec::new();
+                    let mut body = req.into_body();
+                    while let Some(frame) = body.frame().await {
+                        if let Ok(f) = frame {
+                            if let Some(c) = f.data_ref() { body_bytes.extend_from_slice(c); }
+                        } else { break; }
+                    }
+                    let body = Bytes::from(body_bytes);
+                    let lua = route.lua.lock().unwrap();
+                    let handler = route.handler.lock().unwrap();
+                    let req_table = lua.create_table().unwrap();
+                    let _ = req_table.set("method", m.clone());
+                    let _ = req_table.set("path", pth.clone());
+                    let body_str = String::from_utf8_lossy(&body).to_string();
+                    let _ = req_table.set("body", body_str);
+                    let resp = handler.call::<mlua::Value>(mlua::Value::Table(req_table)).unwrap_or(mlua::Value::Nil);
+                    let mut status = 200u16;
+                    let mut out_body = String::new();
+                    if let Some(t) = resp.as_table() {
+                        if let Ok(v) = t.get::<mlua::Value>("status") { if let Some(i) = v.as_integer() { status = i as u16; } }
+                        if let Ok(v) = t.get::<String>("body") { out_body = v; }
+                    }
+                    drop(handler);
+                    drop(lua);
+                    let sc = StatusCode::from_u16(status).unwrap_or(StatusCode::OK);
+                    return Ok::<Response<Full<Bytes>>, hyper::Error>(
+                        Response::builder()
+                            .status(sc)
+                            .header("content-type", "text/html; charset=UTF-8")
+                            .header("server", "LarvaPHP")
+                            .body(Full::new(Bytes::from(out_body)))
+                            .unwrap(),
+                    );
+                }
+            }
+        }
 
         let Some(path) = script_path else {
             return Ok::<Response<Full<Bytes>>, hyper::Error>(
@@ -1626,6 +1641,8 @@ impl Server {
 
                                 // Read request body (drain the stream so hyper doesn't hang)
                                 let mut body_bytes = Vec::new();
+                                let lua_method = req.method().as_str().to_uppercase();
+                                let lua_path = req.uri().path().to_string();
                                 let mut body = req.into_body();
                                 while let Some(frame) = body.frame().await {
                                     match frame {
