@@ -7,12 +7,15 @@ function M.gen_code()
     M.counter = M.counter + 1
     local code = ""
     for i = 1, 6 do
-        code = code .. CHARS:sub(math.random(1, 62), math.random(1, 62))
+        local idx = math.random(1, 62)
+        code = code .. string.sub(CHARS, idx, idx)
     end
-    -- ensure not duplicate
     while M.links[code] do
         code = ""
-        for i = 1, 6 do code = code .. CHARS:sub(math.random(1, 62), math.random(1, 62)) end
+        for i = 1, 6 do
+            local idx = math.random(1, 62)
+            code = code .. string.sub(CHARS, idx, idx)
+        end
     end
     return code
 end
