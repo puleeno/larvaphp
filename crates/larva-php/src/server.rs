@@ -1452,20 +1452,26 @@ impl Server {
                     let resp = handler.call::<mlua::Value>(mlua::Value::Table(req_table)).unwrap_or(mlua::Value::Nil);
                     let mut status = 200u16;
                     let mut out_body = String::new();
+                    let mut headers: Vec<(String,String)> = Vec::new();
                     if let Some(t) = resp.as_table() {
                         if let Ok(v) = t.get::<mlua::Value>("status") { if let Some(i) = v.as_integer() { status = i as u16; } }
                         if let Ok(v) = t.get::<String>("body") { out_body = v; }
+                        if let Ok(h) = t.get::<mlua::Table>("headers") {
+                            for pair in h.pairs::<String,String>() {
+                                if let Ok((k,v)) = pair { headers.push((k,v)); }
+                            }
+                        }
                     }
                     drop(handler);
                     drop(lua);
                     let sc = StatusCode::from_u16(status).unwrap_or(StatusCode::OK);
+                    let mut builder = Response::builder().status(sc).header("server", "LarvaPHP");
+                    for (k,v) in &headers { builder = builder.header(k.as_str(), v.as_str()); }
+                    if !headers.iter().any(|(k,_)| k.eq_ignore_ascii_case("content-type")) {
+                        builder = builder.header("content-type", "text/html; charset=UTF-8");
+                    }
                     return Ok::<Response<Full<Bytes>>, hyper::Error>(
-                        Response::builder()
-                            .status(sc)
-                            .header("content-type", "text/html; charset=UTF-8")
-                            .header("server", "LarvaPHP")
-                            .body(Full::new(Bytes::from(out_body)))
-                            .unwrap(),
+                        builder.body(Full::new(Bytes::from(out_body))).unwrap(),
                     );
                 }
         }
