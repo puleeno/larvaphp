@@ -678,6 +678,35 @@ impl Server {
                 .unwrap());
         }
 
+        // Lua module routes (standalone API services, no PHP).
+        #[cfg(feature = "lua")]
+        {
+            use crate::modules::lua;
+            let method = req.method().as_str().to_uppercase();
+            let path = req.uri().path().to_string();
+            for route in lua::routes() {
+                if route.method == method && route.path == path {
+                    let lua = route.lua.lock().unwrap();
+                    let handler = route.handler.lock().unwrap();
+                    let resp = handler.call::<mlua::Value>(mlua::Value::Nil).unwrap_or(mlua::Value::Nil);
+                    let mut status = 200u16;
+                    let mut body = String::new();
+                    if let Some(t) = resp.as_table() {
+                        if let Ok(v) = t.get::<mlua::Value>("status") { if let Some(i) = v.as_integer() { status = i as u16; } }
+                        if let Ok(v) = t.get::<String>("body") { body = v; }
+                    }
+                    drop(handler);
+                    drop(lua);
+                    return Ok(Response::builder()
+                        .status(status)
+                        .header("content-type", "application/json")
+                        .header("server", "LarvaPHP")
+                        .body(Full::new(Bytes::from(body)))
+                        .unwrap());
+                }
+            }
+        }
+
         let ctx = PhpContext::from_request(&req, Arc::new(Server::fallback()), opts)?;
         ctx.validate()?;
 
