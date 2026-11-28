@@ -1419,8 +1419,20 @@ impl Server {
             use crate::modules::lua;
             let m = req.method().as_str().to_uppercase();
             let pth = uri.split('?').next().unwrap_or("").to_string();
+            // First pass: exact match
+            let mut matched: Option<crate::modules::lua::LuaRoute> = None;
             for route in lua::routes() {
-                if route.method == m && route.path == pth {
+                if route.method == m && route.path == pth { matched = Some(route); break; }
+            }
+            // Second pass: param match
+            if matched.is_none() {
+                for route in lua::routes() {
+                    if route.method == m && route.path.contains(':') && route.path.split('/').count() == pth.split('/').count() {
+                        matched = Some(route); break;
+                    }
+                }
+            }
+            if let Some(route) = matched {
                     // drain body
                     let mut body_bytes = Vec::new();
                     let mut body = req.into_body();
@@ -1456,7 +1468,6 @@ impl Server {
                             .unwrap(),
                     );
                 }
-            }
         }
 
         let Some(path) = script_path else {

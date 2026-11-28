@@ -476,7 +476,7 @@ fn main() -> ExitCode {
         #[cfg(feature = "lua")]
         if let Some(m) = &args.lua_module {
             match larva_php::modules::lua::load_lua_module(m) {
-                Ok(()) => { tracing::info!("loaded lua module: {}", m); #[cfg(feature="lua")] tracing::info!("lua routes: {}", larva_php::modules::lua::routes().len()); }
+                Ok(()) => tracing::info!("loaded lua module: {}", m),
                 Err(e) => eprintln!("failed to load lua module: {}", e),
             }
         }
