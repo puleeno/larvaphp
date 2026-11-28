@@ -1074,6 +1074,14 @@ pub fn panel_html() -> String {
                  x-transition:enter-end="opacity-100 translate-y-0"
                  class="space-y-5">
                 <div class="fancy-card p-5">
+                    <div class="flex gap-2.5 mb-3">
+                        <select class="input-default" @change="fileDir=$event.target.value; listFiles()">
+                            <option value="">Select website root...</option>
+                            <template x-for="w in websites" :key="w.id">
+                                <option :value="w.document_root" x-text="w.domain + ' (' + w.document_root + ')'"></option>
+                            </template>
+                        </select>
+                    </div>
                     <div class="flex flex-wrap gap-2 mb-3 pb-3 border-b border-slate-200">
                         <button class="btn-text text-sm" @click="listFiles()"><i class="fa fa-sync"></i> Reload</button>
                         <button class="btn-text text-sm" @click="fileDir = fileDir.split('/').slice(0,-1).join('/') || '/' ; listFiles()"><i class="fa fa-level-up-alt"></i> Up</button>
@@ -1529,7 +1537,7 @@ pub fn panel_html() -> String {
                     if (page === 'websites') this.fetchWebsites();
                     else if (page === 'ssl') this.fetchSsl();
                     else if (page === 'workers') this.fetchWorkers();
-                    else if (page === 'files' && this.files.length === 0) this.listFiles();
+                    else if (page === 'files') { if (this.websites.length === 0) this.fetchWebsites(); this.listFiles(); }
                     else if (page === 'installer') this.loadInstaller();
                     else if (page === 'mysql') this.loadMysqlAccounts();
                     else if (page === 'postgres') this.loadPostgresAccounts();
