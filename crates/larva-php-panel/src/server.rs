@@ -27,6 +27,8 @@ pub struct PanelState {
     pub reloader: Option<std::sync::Arc<dyn crate::VHostReloader>>,
     /// Optional worker status provider.
     pub worker_provider: Option<std::sync::Arc<dyn crate::WorkerProvider>>,
+    /// Optional database provider for modules.
+    pub db_provider: Option<std::sync::Arc<dyn crate::DbProvider>>,
 }
 
 /// Query params for file listing.
@@ -37,8 +39,8 @@ pub struct FileQuery {
 }
 
 impl PanelState {
-    pub fn new(db: PanelDb, reloader: Option<std::sync::Arc<dyn crate::VHostReloader>>, worker_provider: Option<std::sync::Arc<dyn crate::WorkerProvider>>) -> Self {
-        Self { db, reloader, worker_provider }
+    pub fn new(db: PanelDb, reloader: Option<std::sync::Arc<dyn crate::VHostReloader>>, worker_provider: Option<std::sync::Arc<dyn crate::WorkerProvider>>, db_provider: Option<std::sync::Arc<dyn crate::DbProvider>>) -> Self {
+        Self { db, reloader, worker_provider, db_provider }
     }
 
     /// Rebuild the live vhost routing table from the current website list.

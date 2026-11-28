@@ -472,6 +472,12 @@ fn main() -> ExitCode {
 
         server.activate();
 
+        // Create DB provider early so Lua modules can use larva.db.
+        #[cfg(feature = "panel")]
+        let db_provider_early = larva_php::panel::PanelDbProvider::new().ok().map(|p| std::sync::Arc::new(p) as std::sync::Arc<dyn larva_php::panel::DbProvider>);
+        #[cfg(feature = "lua")]
+        if let Some(dp) = &db_provider_early { larva_php::modules::lua::set_db_provider(dp.clone()); }
+
         // Load Lua module if specified.
         #[cfg(feature = "lua")]
         if let Some(m) = &args.lua_module {
@@ -755,10 +761,11 @@ fn main() -> ExitCode {
 
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         let wp = std::sync::Arc::new(WorkerProviderImpl);
-                        rt.block_on(larva_php::panel::start_with_reloader_and_workers(
+                        rt.block_on(larva_php::panel::start_with_reloader_workers_db(
                             &panel_addr,
                             Some(reloader),
                             Some(wp),
+                            db_provider_early,
                         ))
                     }));
 

@@ -36,6 +36,20 @@ static HOOKS: once_cell::sync::Lazy<Mutex<Vec<LuaHook>>> =
     once_cell::sync::Lazy::new(|| Mutex::new(Vec::new()));
 
 #[cfg(feature = "lua")]
+static DB_PROVIDER: once_cell::sync::Lazy<Mutex<Option<std::sync::Arc<dyn larva_php_panel::DbProvider>>>> =
+    once_cell::sync::Lazy::new(|| Mutex::new(None));
+
+#[cfg(feature = "lua")]
+pub fn set_db_provider(p: std::sync::Arc<dyn larva_php_panel::DbProvider>) {
+    *DB_PROVIDER.lock().unwrap() = Some(p);
+}
+
+#[cfg(feature = "lua")]
+fn db_provider() -> Option<std::sync::Arc<dyn larva_php_panel::DbProvider>> {
+    DB_PROVIDER.lock().unwrap().clone()
+}
+
+#[cfg(feature = "lua")]
 pub fn routes() -> Vec<LuaRoute> { ROUTES.lock().unwrap().clone() }
 
 #[cfg(feature = "lua")]
@@ -94,6 +108,26 @@ pub fn load_lua_module(path: &str) -> Result<(), String> {
     let template = lua.create_table().map_err(|e| e.to_string())?;
     template.set("render", tpl).map_err(|e| e.to_string())?;
     larva.set("template", template).map_err(|e| e.to_string())?;
+
+    // DB access (via provider)
+    let db = lua.create_table().map_err(|e| e.to_string())?;
+    let q = lua.create_function(|_, sql: String| {
+        if let Some(dp) = db_provider() {
+            dp.query(&sql).map_err(mlua::Error::external)
+        } else {
+            Err(mlua::Error::external("no db provider"))
+        }
+    }).map_err(|e| e.to_string())?;
+    let ex = lua.create_function(|_, sql: String| {
+        if let Some(dp) = db_provider() {
+            dp.execute(&sql).map_err(mlua::Error::external)
+        } else {
+            Err(mlua::Error::external("no db provider"))
+        }
+    }).map_err(|e| e.to_string())?;
+    db.set("query", q).map_err(|e| e.to_string())?;
+    db.set("execute", ex).map_err(|e| e.to_string())?;
+    larva.set("db", db).map_err(|e| e.to_string())?;
 
     lua.globals().set("larva", larva).map_err(|e| e.to_string())?;
     // Support loading a directory of .lua files

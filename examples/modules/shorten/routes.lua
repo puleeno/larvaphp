@@ -11,12 +11,12 @@ larva.route("POST", "/api/shorten", function(req)
     local url = get_param(req.body, "url")
     if url == "" then url = req.body or "" end
     local code = M.gen_code()
-    M.links[code] = url
+    M.save(code, url)
     return { status = 200, body = '{"code":"' .. code .. '","short_url":"/' .. code .. '"}' }
 end)
 larva.route("GET", "/:code", function(req)
     local code = (req.path or ""):match("/(.+)")
-    local url = M.links[code]
+    local url = M.find(code)
     if url and url ~= "" then
         return { status = 302, headers = { Location = url } }
     end

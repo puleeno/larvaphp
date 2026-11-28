@@ -1,5 +1,9 @@
 local M = _G.shorten
 larva.route("GET", "/dashboard", function(req)
+    local rows = ""
+    for _, r in ipairs(M.all()) do
+        rows = rows .. "<tr class='border-b border-slate-100'><td class='px-4 py-2 font-mono text-indigo-600'>" .. (r.code or "") .. "</td><td class='px-4 py-2 text-slate-600 truncate max-w-xs'>" .. (r.url or "") .. "</td></tr>"
+    end
     local html = [[<!DOCTYPE html><html><head><script src="https://cdn.tailwindcss.com"></script><script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script></head><body class="bg-slate-50 min-h-screen" x-data="{page:'list'}">
     <div class="max-w-4xl mx-auto p-8">
       <h1 class="text-3xl font-bold text-slate-900 mb-6">Shorten Links</h1>
@@ -9,7 +13,7 @@ larva.route("GET", "/dashboard", function(req)
       </nav>
       <div x-show="page==='list'" class="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
         <table class="w-full"><thead class="bg-slate-50"><tr><th class="px-4 py-3 text-left text-xs font-semibold text-slate-500 uppercase">Code</th><th class="px-4 py-3 text-left text-xs font-semibold text-slate-500 uppercase">URL</th></tr></thead>
-        <tbody><tr><td class="px-4 py-2 font-mono text-indigo-600">demo</td><td class="px-4 py-2 text-slate-600">https://example.com</td></tr></tbody></table>
+        <tbody>]] .. rows .. [[</tbody></table>
       </div>
       <div x-show="page==='create'" class="bg-white rounded-2xl shadow-sm border border-slate-200 p-6">
         <form method="POST" action="/api/shorten" class="flex gap-3">
