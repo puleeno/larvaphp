@@ -5,11 +5,14 @@ M.counter = 0
 local CHARS = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
 function M.gen_code()
     M.counter = M.counter + 1
-    local n = M.counter
     local code = ""
     for i = 1, 6 do
-        code = code .. CHARS:sub((n % 62) + 1, (n % 62) + 1)
-        n = math.floor(n / 62)
+        code = code .. CHARS:sub(math.random(1, 62), math.random(1, 62))
+    end
+    -- ensure not duplicate
+    while M.links[code] do
+        code = ""
+        for i = 1, 6 do code = code .. CHARS:sub(math.random(1, 62), math.random(1, 62)) end
     end
     return code
 end
