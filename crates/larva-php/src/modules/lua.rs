@@ -43,7 +43,7 @@ pub fn hooks() -> Vec<LuaHook> { HOOKS.lock().unwrap().clone() }
 
 #[cfg(feature = "lua")]
 pub fn load_lua_module(path: &str) -> Result<(), String> {
-    let lua = Lua::new();
+    let lua = Lua::new_with(LuaStdLib::STRING | LuaStdLib::TABLE | LuaStdLib::MATH | LuaStdLib::PACKAGE, LuaOptions::default()).map_err(|e| e.to_string())?;
     let larva = lua.create_table().map_err(|e| e.to_string())?;
 
     let register = lua.create_function(|lua, (method, path, func): (String, String, LuaFunction)| {
