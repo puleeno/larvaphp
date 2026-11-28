@@ -18,6 +18,7 @@ larva.route("GET", "/:code", function(req)
     local code = (req.path or ""):match("/(.+)")
     local url = M.find(code)
     if url and url ~= "" then
+        pcall(function() larva.db.execute("UPDATE shorten_links SET clicks = clicks + 1 WHERE code = '" .. code .. "'") end)
         return { status = 302, headers = { Location = url } }
     end
     return { status = 404, body = "Not found" }

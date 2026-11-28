@@ -2,7 +2,7 @@ local M = _G.shorten
 larva.route("GET", "/dashboard", function(req)
     local rows = ""
     for _, r in ipairs(M.all()) do
-        rows = rows .. "<tr class='border-b border-slate-100'><td class='px-4 py-2 font-mono text-indigo-600'>" .. (r.code or "") .. "</td><td class='px-4 py-2 text-slate-600 truncate max-w-xs'>" .. (r.url or "") .. "</td></tr>"
+        rows = rows .. "<tr class='border-b border-slate-100'><td class='px-4 py-2 font-mono text-indigo-600'>" .. (r.code or "") .. "</td><td class='px-4 py-2 text-slate-600 truncate max-w-xs'>" .. (r.url or "") .. "</td><td class='px-4 py-2 text-slate-500'>" .. tostring(r.clicks or 0) .. "</td></tr>"
     end
     local html = [[<!DOCTYPE html><html><head><script src="https://cdn.tailwindcss.com"></script><script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script></head><body class="bg-slate-50 min-h-screen" x-data="{page:'list'}">
     <div class="max-w-4xl mx-auto p-8">
@@ -12,7 +12,7 @@ larva.route("GET", "/dashboard", function(req)
         <a href="#create" @click="page='create'" class="text-indigo-600 font-medium">Create</a>
       </nav>
       <div x-show="page==='list'" class="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
-        <table class="w-full"><thead class="bg-slate-50"><tr><th class="px-4 py-3 text-left text-xs font-semibold text-slate-500 uppercase">Code</th><th class="px-4 py-3 text-left text-xs font-semibold text-slate-500 uppercase">URL</th></tr></thead>
+        <table class="w-full"><thead class="bg-slate-50"><tr><th class="px-4 py-3 text-left text-xs font-semibold text-slate-500 uppercase">Code</th><th class="px-4 py-3 text-left text-xs font-semibold text-slate-500 uppercase">URL</th><th class="px-4 py-3 text-left text-xs font-semibold text-slate-500 uppercase">Clicks</th></tr></thead>
         <tbody>]] .. rows .. [[</tbody></table>
       </div>
       <div x-show="page==='create'" class="bg-white rounded-2xl shadow-sm border border-slate-200 p-6">
