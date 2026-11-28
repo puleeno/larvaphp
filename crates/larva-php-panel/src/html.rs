@@ -1074,6 +1074,12 @@ pub fn panel_html() -> String {
                  x-transition:enter-end="opacity-100 translate-y-0"
                  class="space-y-5">
                 <div class="fancy-card p-5">
+                    <div class="flex flex-wrap gap-2 mb-3 pb-3 border-b border-slate-200">
+                        <button class="btn-text text-sm" @click="listFiles()"><i class="fa fa-sync"></i> Reload</button>
+                        <button class="btn-text text-sm" @click="fileDir = fileDir.split('/').slice(0,-1).join('/') || '/' ; listFiles()"><i class="fa fa-level-up-alt"></i> Up</button>
+                        <button class="btn-text text-sm" @click="const n=prompt('New file name:'); if(n){fileDir=fileDir+'/'+n; listFiles();}"><i class="fa fa-file"></i> New File</button>
+                        <button class="btn-text text-sm" @click="const n=prompt('New folder name:'); if(n){fileDir=fileDir+'/'+n; listFiles();}"><i class="fa fa-folder"></i> New Folder</button>
+                    </div>
                     <div class="flex gap-2.5 mb-5">
                         <input type="text" class="input-default flex-1 font-mono text-sm" placeholder="Current directory" x-model="fileDir" @keydown.enter="listFiles()">
                         <button @click="listFiles()" class="btn-primary px-5 inline-flex items-center gap-2">
