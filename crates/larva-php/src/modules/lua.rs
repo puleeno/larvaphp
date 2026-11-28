@@ -76,6 +76,13 @@ pub fn load_lua_module(path: &str) -> Result<(), String> {
     }).map_err(|e| e.to_string())?;
     larva.set("on_request", on_request).map_err(|e| e.to_string())?;
     larva.set("on_response", on_response).map_err(|e| e.to_string())?;
+    // Panel integration: modules can register panel pages/routes
+    let panel_page = lua.create_function(|_lua, (slug, title): (String, String)| {
+        // Store in a separate registry (placeholder)
+        let _ = (slug, title);
+        Ok(())
+    }).map_err(|e| e.to_string())?;
+    larva.set("panel_page", panel_page).map_err(|e| e.to_string())?;
     lua.globals().set("larva", larva).map_err(|e| e.to_string())?;
     lua.load(std::fs::read_to_string(path).map_err(|e| e.to_string())?)
         .exec()
