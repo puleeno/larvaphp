@@ -681,15 +681,19 @@ async fn delete_listener(State(state): State<PanelState>, Path(id): Path<String>
 }
 
 async fn read_file(Query(query): Query<FileQuery>) -> Json<ApiResponse<String>> {
-    let path = query.path.unwrap_or_default();
+    let mut path = query.path.unwrap_or_default();
+    // Normalize Unix-style paths on Windows
+    if path.starts_with('/') { path = path.trim_start_matches('/').replace('/', "\\"); }
+    if path.is_empty() { path = ".".into(); }
     match std::fs::read_to_string(&path) {
         Ok(c) => api_json(c),
-        Err(e) => api_err(&format!("read file: {}", e)),
+        Err(_) => api_json(String::new()),
     }
 }
 
 async fn write_file(Json(payload): Json<serde_json::Value>) -> Json<ApiResponse<String>> {
-    let path = payload.get("path").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let mut path = payload.get("path").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    if path.starts_with('/') { path = path.trim_start_matches('/').replace('/', "\\"); }
     let content = payload.get("content").and_then(|v| v.as_str()).unwrap_or("").to_string();
     match std::fs::write(&path, content) {
         Ok(_) => api_json("saved".to_string()),
