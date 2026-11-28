@@ -128,3 +128,18 @@ pub fn load_lua_module(path: &str) -> Result<(), String> {
 pub fn load_lua_module(_path: &str) -> Result<(), String> {
     Err("lua feature not enabled".into())
 }
+
+
+#[cfg(all(test, feature = "lua"))]
+mod tests {
+    use super::*;
+    #[test]
+    fn load_simple_module() {
+        let dir = std::env::temp_dir().join("lua_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("t.lua");
+        std::fs::write(&path, "larva.route('GET','/t',function(req) return {status=200,body='ok'} end)").unwrap();
+        assert!(load_lua_module(path.to_str().unwrap()).is_ok());
+        assert!(!routes().is_empty());
+    }
+}
