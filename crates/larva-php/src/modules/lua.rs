@@ -1,10 +1,4 @@
 //! Lua module loader (LuaJIT via mlua).
-//!
-//! Lua modules can register HTTP routes and intervene at layers.
-//! Example lua:
-//!   larva.route("GET", "/api/hello", function(req)
-//!       return { status = 200, body = "Hello from Lua" }
-//!   end)
 
 #[cfg(feature = "lua")]
 use std::sync::{Arc, Mutex};
@@ -22,10 +16,6 @@ pub struct LuaRoute {
 }
 
 #[cfg(feature = "lua")]
-static ROUTES: once_cell::sync::Lazy<Mutex<Vec<LuaRoute>>> =
-    once_cell::sync::Lazy::new(|| Mutex::new(Vec::new()));
-
-#[cfg(feature = "lua")]
 #[derive(Clone)]
 pub enum HookKind { Request, Response }
 
@@ -38,34 +28,35 @@ pub struct LuaHook {
 }
 
 #[cfg(feature = "lua")]
+static ROUTES: once_cell::sync::Lazy<Mutex<Vec<LuaRoute>>> =
+    once_cell::sync::Lazy::new(|| Mutex::new(Vec::new()));
+
+#[cfg(feature = "lua")]
 static HOOKS: once_cell::sync::Lazy<Mutex<Vec<LuaHook>>> =
     once_cell::sync::Lazy::new(|| Mutex::new(Vec::new()));
+
+#[cfg(feature = "lua")]
+pub fn routes() -> Vec<LuaRoute> { ROUTES.lock().unwrap().clone() }
 
 #[cfg(feature = "lua")]
 pub fn hooks() -> Vec<LuaHook> { HOOKS.lock().unwrap().clone() }
 
 #[cfg(feature = "lua")]
-pub fn routes() -> Vec<LuaRoute> {
-    ROUTES.lock().unwrap().clone()
-}
-
-#[cfg(feature = "lua")]
 pub fn load_lua_module(path: &str) -> Result<(), String> {
     let lua = Lua::new();
     let larva = lua.create_table().map_err(|e| e.to_string())?;
-    let register = lua
-        .create_function(|lua, (method, path, func): (String, String, LuaFunction)| {
-            let route = LuaRoute {
-                method: method.to_uppercase(),
-                path,
-                handler: Arc::new(Mutex::new(func)),
-                lua: Arc::new(Mutex::new(lua.clone())),
-            };
-            ROUTES.lock().unwrap().push(route);
-            Ok(())
-        })
-        .map_err(|e| e.to_string())?;
+
+    let register = lua.create_function(|lua, (method, path, func): (String, String, LuaFunction)| {
+        ROUTES.lock().unwrap().push(LuaRoute {
+            method: method.to_uppercase(),
+            path,
+            handler: Arc::new(Mutex::new(func)),
+            lua: Arc::new(Mutex::new(lua.clone())),
+        });
+        Ok(())
+    }).map_err(|e| e.to_string())?;
     larva.set("route", register).map_err(|e| e.to_string())?;
+
     let on_request = lua.create_function(|lua, func: LuaFunction| {
         HOOKS.lock().unwrap().push(LuaHook { kind: HookKind::Request, handler: Arc::new(Mutex::new(func)), lua: Arc::new(Mutex::new(lua.clone())) });
         Ok(())
@@ -76,17 +67,37 @@ pub fn load_lua_module(path: &str) -> Result<(), String> {
     }).map_err(|e| e.to_string())?;
     larva.set("on_request", on_request).map_err(|e| e.to_string())?;
     larva.set("on_response", on_response).map_err(|e| e.to_string())?;
-    // Panel integration: modules can register panel pages/routes
-    let panel_page = lua.create_function(|_lua, (slug, title): (String, String)| {
-        // Store in a separate registry (placeholder)
-        let _ = (slug, title);
-        Ok(())
-    }).map_err(|e| e.to_string())?;
+
+    // panel integration
+    let panel_page = lua.create_function(|_lua, (_slug, _title): (String, String)| Ok(())).map_err(|e| e.to_string())?;
     larva.set("panel_page", panel_page).map_err(|e| e.to_string())?;
+
+    // crypto
+    let crypto = lua.create_table().map_err(|e| e.to_string())?;
+    let b64e = lua.create_function(|_, s: String| Ok(base64::Engine::encode(&base64::engine::general_purpose::STANDARD, s))).map_err(|e| e.to_string())?;
+    let b64d = lua.create_function(|_, s: String| {
+        let b = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, s).map_err(mlua::Error::external)?;
+        Ok(String::from_utf8_lossy(&b).to_string())
+    }).map_err(|e| e.to_string())?;
+    crypto.set("b64encode", b64e).map_err(|e| e.to_string())?;
+    crypto.set("b64decode", b64d).map_err(|e| e.to_string())?;
+    larva.set("crypto", crypto).map_err(|e| e.to_string())?;
+
+    // template
+    let tpl = lua.create_function(|_, (tmpl, vars): (String, LuaTable)| {
+        let mut out = tmpl.clone();
+        for pair in vars.pairs::<String, String>() {
+            if let Ok((k, v)) = pair { out = out.replace(&format!("{{{{{}}}}}", k), &v); }
+        }
+        Ok(out)
+    }).map_err(|e| e.to_string())?;
+    let template = lua.create_table().map_err(|e| e.to_string())?;
+    template.set("render", tpl).map_err(|e| e.to_string())?;
+    larva.set("template", template).map_err(|e| e.to_string())?;
+
     lua.globals().set("larva", larva).map_err(|e| e.to_string())?;
-    lua.load(std::fs::read_to_string(path).map_err(|e| e.to_string())?)
-        .exec()
-        .map_err(|e| e.to_string())?;
+    let src = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    lua.load(src).exec().map_err(|e| e.to_string())?;
     Ok(())
 }
 
