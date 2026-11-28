@@ -901,6 +901,29 @@ impl Server {
         req_headers: &[(String, String)],
         body: &[u8],
     ) -> Result<(StatusCode, Vec<(String, String)>, Vec<u8>)> {
+        // Lua module routes (standalone API services, no PHP).
+        #[cfg(feature = "lua")]
+        {
+            use crate::modules::lua;
+            let path = uri.split('?').next().unwrap_or("");
+            for route in lua::routes() {
+                if route.method == method.to_uppercase() && route.path == path {
+                    let lua = route.lua.lock().unwrap();
+                    let handler = route.handler.lock().unwrap();
+                    let resp = handler.call::<mlua::Value>(mlua::Value::Nil).unwrap_or(mlua::Value::Nil);
+                    let mut status = 200u16;
+                    let mut body = String::new();
+                    if let Some(t) = resp.as_table() {
+                        if let Ok(v) = t.get::<mlua::Value>("status") { if let Some(i) = v.as_integer() { status = i as u16; } }
+                        if let Ok(v) = t.get::<String>("body") { body = v; }
+                    }
+                    drop(handler);
+                    drop(lua);
+                    let sc = StatusCode::from_u16(status).unwrap_or(StatusCode::OK);
+                    return Ok((sc, vec![("content-type".to_string(), "text/html; charset=UTF-8".to_string()), ("server".to_string(), "LarvaPHP".to_string())], body.into_bytes()));
+                }
+            }
+        }
 // Serve robots.txt directly (bypass PHP/front-controller fallback).
         // This must happen BEFORE resolve_script_path (which would append .php).
         let uri_path = uri.split('?').next().unwrap_or("");
@@ -1298,6 +1321,38 @@ impl Server {
                                                 .body(Full::new(Bytes::new()))
                                                 .unwrap(),
                                         );
+                                    }
+                                }
+
+                                // Lua module routes (standalone API services, no PHP).
+                                #[cfg(feature = "lua")]
+                                {
+                                    use crate::modules::lua;
+                                    let m = req.method().as_str().to_uppercase();
+                                    let pth = req.uri().path().to_string();
+                                    for route in lua::routes() {
+                                        if route.method == m && route.path == pth {
+                                            let lua = route.lua.lock().unwrap();
+                                            let handler = route.handler.lock().unwrap();
+                                            let resp = handler.call::<mlua::Value>(mlua::Value::Nil).unwrap_or(mlua::Value::Nil);
+                                            let mut status = 200u16;
+                                            let mut body = String::new();
+                                            if let Some(t) = resp.as_table() {
+                                                if let Ok(v) = t.get::<mlua::Value>("status") { if let Some(i) = v.as_integer() { status = i as u16; } }
+                                                if let Ok(v) = t.get::<String>("body") { body = v; }
+                                            }
+                                            drop(handler);
+                                            drop(lua);
+                                            let sc = StatusCode::from_u16(status).unwrap_or(StatusCode::OK);
+                                            return Ok::<Response<Full<Bytes>>, hyper::Error>(
+                                                Response::builder()
+                                                    .status(sc)
+                                                    .header("content-type", "text/html; charset=UTF-8")
+                                                    .header("server", "LarvaPHP")
+                                                    .body(Full::new(Bytes::from(body)))
+                                                    .unwrap(),
+                                            );
+                                        }
                                     }
                                 }
 

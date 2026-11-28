@@ -56,6 +56,8 @@ struct Args {
     /// 2-layer fault-isolated runtime when > 0.
     #[arg(long = "workers", value_name = "N", default_value = "0")]
     workers: usize,
+    #[arg(long = "lua-module", value_name = "FILE")]
+    lua_module: Option<String>,
 
     /// Generate a shell completion script and exit (bash|zsh|fish|powershell)
     #[arg(long = "completion", value_name = "SHELL")]
@@ -469,6 +471,15 @@ fn main() -> ExitCode {
         }
 
         server.activate();
+
+        // Load Lua module if specified.
+        #[cfg(feature = "lua")]
+        if let Some(m) = &args.lua_module {
+            match larva_php::modules::lua::load_lua_module(m) {
+                Ok(()) => tracing::info!("loaded lua module: {}", m),
+                Err(e) => eprintln!("failed to load lua module: {}", e),
+            }
+        }
 
         // Embedded mode: use the in-process PHP runtime (lazy: only if enabled).
         if server.feature_enabled(larva_php::FeatureKind::Embedded) {
