@@ -901,6 +901,29 @@ impl Server {
         req_headers: &[(String, String)],
         body: &[u8],
     ) -> Result<(StatusCode, Vec<(String, String)>, Vec<u8>)> {
+        // Lua module routes (standalone API services, no PHP).
+        #[cfg(feature = "lua")]
+        {
+            use crate::modules::lua;
+            let path = uri.split('?').next().unwrap_or("");
+            for route in lua::routes() {
+                if route.method == method.to_uppercase() && route.path == path {
+                    let lua = route.lua.lock().unwrap();
+                    let handler = route.handler.lock().unwrap();
+                    let resp = handler.call::<mlua::Value>(mlua::Value::Nil).unwrap_or(mlua::Value::Nil);
+                    let mut status = 200u16;
+                    let mut body = String::new();
+                    if let Some(t) = resp.as_table() {
+                        if let Ok(v) = t.get::<mlua::Value>("status") { if let Some(i) = v.as_integer() { status = i as u16; } }
+                        if let Ok(v) = t.get::<String>("body") { body = v; }
+                    }
+                    drop(handler);
+                    drop(lua);
+                    let sc = StatusCode::from_u16(status).unwrap_or(StatusCode::OK);
+                    return Ok((sc, vec![("content-type".to_string(), "text/html; charset=UTF-8".to_string()), ("server".to_string(), "LarvaPHP".to_string())], body.into_bytes()));
+                }
+            }
+        }
 // Serve robots.txt directly (bypass PHP/front-controller fallback).
         // This must happen BEFORE resolve_script_path (which would append .php).
         let uri_path = uri.split('?').next().unwrap_or("");
@@ -1389,6 +1412,70 @@ impl Server {
             }
         };
 
+        // Lua module routes (standalone API services, no PHP) — checked
+        // before script resolution so non-PHP paths are served.
+        #[cfg(feature = "lua")]
+        {
+            use crate::modules::lua;
+            let m = req.method().as_str().to_uppercase();
+            let pth = uri.split('?').next().unwrap_or("").to_string();
+            // First pass: exact match
+            let mut matched: Option<crate::modules::lua::LuaRoute> = None;
+            for route in lua::routes() {
+                if route.method == m && route.path == pth { matched = Some(route); break; }
+            }
+            // Second pass: param match
+            if matched.is_none() {
+                for route in lua::routes() {
+                    if route.method == m && route.path.contains(':') && route.path.split('/').count() == pth.split('/').count() {
+                        matched = Some(route); break;
+                    }
+                }
+            }
+            if let Some(route) = matched {
+                    // drain body
+                    let mut body_bytes = Vec::new();
+                    let mut body = req.into_body();
+                    while let Some(frame) = body.frame().await {
+                        if let Ok(f) = frame {
+                            if let Some(c) = f.data_ref() { body_bytes.extend_from_slice(c); }
+                        } else { break; }
+                    }
+                    let body = Bytes::from(body_bytes);
+                    let lua = route.lua.lock().unwrap();
+                    let handler = route.handler.lock().unwrap();
+                    let req_table = lua.create_table().unwrap();
+                    let _ = req_table.set("method", m.clone());
+                    let _ = req_table.set("path", pth.clone());
+                    let body_str = String::from_utf8_lossy(&body).to_string();
+                    let _ = req_table.set("body", body_str);
+                    let resp = handler.call::<mlua::Value>(mlua::Value::Table(req_table)).unwrap_or(mlua::Value::Nil);
+                    let mut status = 200u16;
+                    let mut out_body = String::new();
+                    let mut headers: Vec<(String,String)> = Vec::new();
+                    if let Some(t) = resp.as_table() {
+                        if let Ok(v) = t.get::<mlua::Value>("status") { if let Some(i) = v.as_integer() { status = i as u16; } }
+                        if let Ok(v) = t.get::<String>("body") { out_body = v; }
+                        if let Ok(h) = t.get::<mlua::Table>("headers") {
+                            for pair in h.pairs::<String,String>() {
+                                if let Ok((k,v)) = pair { headers.push((k,v)); }
+                            }
+                        }
+                    }
+                    drop(handler);
+                    drop(lua);
+                    let sc = StatusCode::from_u16(status).unwrap_or(StatusCode::OK);
+                    let mut builder = Response::builder().status(sc).header("server", "LarvaPHP");
+                    for (k,v) in &headers { builder = builder.header(k.as_str(), v.as_str()); }
+                    if !headers.iter().any(|(k,_)| k.eq_ignore_ascii_case("content-type")) {
+                        builder = builder.header("content-type", "text/html; charset=UTF-8");
+                    }
+                    return Ok::<Response<Full<Bytes>>, hyper::Error>(
+                        builder.body(Full::new(Bytes::from(out_body))).unwrap(),
+                    );
+                }
+        }
+
         let Some(path) = script_path else {
             return Ok::<Response<Full<Bytes>>, hyper::Error>(
                 Response::builder()
@@ -1571,6 +1658,8 @@ impl Server {
 
                                 // Read request body (drain the stream so hyper doesn't hang)
                                 let mut body_bytes = Vec::new();
+                                let lua_method = req.method().as_str().to_uppercase();
+                                let lua_path = req.uri().path().to_string();
                                 let mut body = req.into_body();
                                 while let Some(frame) = body.frame().await {
                                     match frame {

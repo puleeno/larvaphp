@@ -49,6 +49,7 @@ larva-php-panel = { workspace = true, optional = true }
 memmap2 = { workspace = true }
 num_cpus = { workspace = true }
 flate2 = { workspace = true }
+
 mlua = { version = "0.10", optional = true, features = ["luajit", "vendored", "send"] }
 
 [features]
@@ -61,7 +62,7 @@ fcgi = []
 embedded = []
 acme = ["reqwest", "rustls", "base64"]
 panel = ["larva-php-panel"]
-lua = ["mlua"]
+lua = ["mlua", "base64"]
 wasm = []
 tls = ["rustls", "tokio-rustls", "rustls-pemfile"]
 
