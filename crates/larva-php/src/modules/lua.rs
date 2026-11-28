@@ -96,8 +96,31 @@ pub fn load_lua_module(path: &str) -> Result<(), String> {
     larva.set("template", template).map_err(|e| e.to_string())?;
 
     lua.globals().set("larva", larva).map_err(|e| e.to_string())?;
-    let src = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
-    lua.load(src).exec().map_err(|e| e.to_string())?;
+    // Support loading a directory of .lua files
+    let p = std::path::Path::new(path);
+    if p.is_dir() {
+        // set package.path
+        let dir = p.to_string_lossy();
+        let _ = lua.load(format!("package.path = package.path .. ';{}/?.lua'", dir)).exec();
+        let mut entries: Vec<_> = std::fs::read_dir(p).map_err(|e| e.to_string())?.filter_map(|e| e.ok()).collect();
+        // sort: init.lua first, then alphabetical
+        entries.sort_by_key(|e| {
+            let n = e.file_name().to_string_lossy().to_string();
+            if n == "init.lua" { "0_init.lua".to_string() } else { n }
+        });
+        let dir_fwd = p.to_string_lossy().replace('\\', "/");
+        let _ = lua.load(format!("package.path = package.path .. ';{}/?.lua'", dir_fwd)).exec();
+        for e in entries {
+            let fp = e.path();
+            if fp.extension().and_then(|x| x.to_str()) == Some("lua") {
+                let src = std::fs::read_to_string(&fp).map_err(|e| e.to_string())?;
+                lua.load(src).set_name(fp.to_string_lossy().as_ref()).exec().map_err(|e| e.to_string())?;
+            }
+        }
+    } else {
+        let src = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+        lua.load(src).exec().map_err(|e| e.to_string())?;
+    }
     Ok(())
 }
 
